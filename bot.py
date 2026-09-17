@@ -21,7 +21,7 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     )
 
 client = Groq(api_key=GROQ_API_KEY)
-MODEL = "llama-3.1-8b-instant"
+MODEL = "openai/gpt-oss-120b"
 
 
 def ask_ai(prompt: str) -> str:
