@@ -1,15 +1,15 @@
 """
 Talaba Yordamchi Bot (Groq + Pexels, Railway uchun tayyor)
 -----------------------------------------------------------------
-/slayd  - suhbat orqali: mavzu -> slaydlar soni (1-12) -> muallif ismi
-          -> rasmli, dizaynli .pptx fayl
-/mustaqil <mavzu> - .docx (Word) fayl
+/slayd     - suhbat: mavzu -> slayd sahifalari soni (1-12) -> muallif -> .pptx
+/mustaqil  - suhbat: mavzu -> ish sahifalari soni (1-12) -> muallif -> .docx
 """
 
 import os
 import json
 import re
 import random
+import traceback
 from io import BytesIO
 
 import requests
@@ -25,12 +25,14 @@ from telegram.ext import (
 )
 
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import MSO_SHAPE
 
 from docx import Document
 from docx.shared import Pt as DocxPt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -45,12 +47,11 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
 client = Groq(api_key=GROQ_API_KEY)
 MODEL = "openai/gpt-oss-120b"
 
-MAX_SLIDES = 12
+MAX_COUNT = 12
 
-# Suhbat bosqichlari
+# Suhbat bosqichlari (ikkala buyruq uchun ham umumiy)
 MAVZU, SONI, MUALLIF = range(3)
 
-# Turli dizaynlar (fon rangi, sarlavha rangi, matn rangi, urg'u rangi)
 THEMES = [
     {"bg": RGBColor(0x1A, 0x23, 0x3A), "title": RGBColor(0xFF, 0xFF, 0xFF), "text": RGBColor(0xE0, 0xE0, 0xE0), "accent": RGBColor(0x4F, 0xA8, 0xE0)},
     {"bg": RGBColor(0xFF, 0xFF, 0xFF), "title": RGBColor(0x1A, 0x23, 0x3A), "text": RGBColor(0x33, 0x33, 0x33), "accent": RGBColor(0xE0, 0x6A, 0x4F)},
@@ -62,7 +63,7 @@ THEMES = [
 def ask_ai(prompt: str) -> str:
     response = client.chat.completions.create(
         model=MODEL,
-        max_tokens=2500,
+        max_tokens=3000,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content
@@ -76,25 +77,45 @@ def extract_json(text: str) -> dict:
 
 
 def get_image(query: str):
-    """Pexels'dan mavzuga mos rasm oladi. Muvaffaqiyatsiz bo'lsa None qaytaradi."""
+    """Pexels'dan mavzuga mos rasm oladi. Muammo bo'lsa, sababini logga chiqarib None qaytaradi."""
     if not PEXELS_API_KEY:
+        print("PEXELS_API_KEY topilmadi - rasm o'tkazib yuborildi")
         return None
     try:
         resp = requests.get(
             "https://api.pexels.com/v1/search",
             headers={"Authorization": PEXELS_API_KEY},
             params={"query": query, "per_page": 1, "orientation": "landscape"},
-            timeout=10,
+            timeout=15,
         )
+        if resp.status_code != 200:
+            print(f"Pexels xatosi: status={resp.status_code}, matn={resp.text[:200]}")
+            return None
         data = resp.json()
         photos = data.get("photos", [])
         if not photos:
+            print(f"Pexels'da '{query}' uchun rasm topilmadi")
             return None
         img_url = photos[0]["src"]["large"]
-        img_resp = requests.get(img_url, timeout=10)
+        img_resp = requests.get(img_url, timeout=15)
+        if img_resp.status_code != 200:
+            print(f"Rasmni yuklab bo'lmadi: status={img_resp.status_code}")
+            return None
         return BytesIO(img_resp.content)
     except Exception:
+        print("Pexels/rasm xatosi:")
+        traceback.print_exc()
         return None
+
+
+def add_background(slide, prs, color):
+    """Slaydga fon rangi qo'shadi. Birinchi bo'lib qo'shilgani uchun avtomatik eng orqada turadi."""
+    bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    bg.fill.solid()
+    bg.fill.fore_color.rgb = color
+    bg.line.fill.background()
+    bg.shadow.inherit = False
+    return bg
 
 
 def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
@@ -104,20 +125,10 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
     theme = random.choice(THEMES)
     blank = prs.slide_layouts[6]
 
-    def add_background(slide):
-        bg = slide.shapes.add_shape(1, 0, 0, prs.slide_width, prs.slide_height)
-        bg.fill.solid()
-        bg.fill.fore_color.rgb = theme["bg"]
-        bg.line.fill.background()
-        bg.shadow.inherit = False
-        # Fonni orqaga qaytarish
-        slide.shapes._spTree.remove(bg._element)
-        slide.shapes._spTree.insert(2, bg._element)
-        return bg
-
     # --- Titul slayd ---
     slide = prs.slides.add_slide(blank)
-    add_background(slide)
+    add_background(slide, prs, theme["bg"])
+
     title_box = slide.shapes.add_textbox(Inches(1), Inches(2.7), Inches(11.33), Inches(1.5))
     tf = title_box.text_frame
     tf.word_wrap = True
@@ -129,8 +140,7 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
     p.font.color.rgb = theme["title"]
 
     author_box = slide.shapes.add_textbox(Inches(1), Inches(4.3), Inches(11.33), Inches(0.8))
-    tf2 = author_box.text_frame
-    p2 = tf2.paragraphs[0]
+    p2 = author_box.text_frame.paragraphs[0]
     p2.text = f"Tayyorladi: {muallif}"
     p2.alignment = PP_ALIGN.CENTER
     p2.font.size = Pt(22)
@@ -141,13 +151,12 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
     # --- Mazmun slaydlari ---
     for idx, item in enumerate(slides_data, start=1):
         slide = prs.slides.add_slide(blank)
-        add_background(slide)
+        add_background(slide, prs, theme["bg"])
 
-        image_on_left = idx % 2 == 1  # slaydlar bo'yicha almashadi - dizayn xilma-xilligi uchun
+        image_on_left = idx % 2 == 1
         text_x = Inches(6.8) if image_on_left else Inches(0.7)
         img_x = Inches(0.5) if image_on_left else Inches(7.1)
 
-        # Sarlavha
         title_box = slide.shapes.add_textbox(text_x, Inches(0.5), Inches(6.0), Inches(1.0))
         tf = title_box.text_frame
         tf.word_wrap = True
@@ -157,7 +166,6 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
         p.font.bold = True
         p.font.color.rgb = theme["title"]
 
-        # Bandlar (bullets)
         body_box = slide.shapes.add_textbox(text_x, Inches(1.6), Inches(6.0), Inches(5.3))
         tf = body_box.text_frame
         tf.word_wrap = True
@@ -169,15 +177,14 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
             p.font.color.rgb = theme["text"]
             p.space_after = Pt(12)
 
-        # Rasm
         img_data = get_image(item.get("title", mavzu))
         if img_data:
             try:
                 slide.shapes.add_picture(img_data, img_x, Inches(1.6), width=Inches(5.7), height=Inches(4.8))
             except Exception:
-                pass
+                print("Rasmni slaydga joylashtirishda xato:")
+                traceback.print_exc()
 
-        # Slayd raqami
         num_box = slide.shapes.add_textbox(Inches(12.5), Inches(7.05), Inches(0.7), Inches(0.4))
         p = num_box.text_frame.paragraphs[0]
         p.text = f"{idx}/{total}"
@@ -190,9 +197,27 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
     return buffer
 
 
-def create_docx(mavzu: str, matn: str) -> BytesIO:
+def create_docx(mavzu: str, muallif: str, matn: str) -> BytesIO:
     doc = Document()
-    doc.add_heading(mavzu, level=1)
+
+    # Titul sahifasi
+    for _ in range(6):
+        doc.add_paragraph()
+    title_p = doc.add_paragraph()
+    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title_p.add_run(mavzu)
+    run.font.size = DocxPt(24)
+    run.font.bold = True
+
+    doc.add_paragraph()
+    author_p = doc.add_paragraph()
+    author_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run2 = author_p.add_run(f"Tuzuvchi: {muallif}")
+    run2.font.size = DocxPt(14)
+
+    doc.add_page_break()
+
+    # Asosiy matn
     for paragraph in matn.split("\n"):
         paragraph = paragraph.strip()
         if not paragraph:
@@ -203,6 +228,7 @@ def create_docx(mavzu: str, matn: str) -> BytesIO:
             p = doc.add_paragraph(paragraph)
             for run in p.runs:
                 run.font.size = DocxPt(12)
+
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
@@ -214,109 +240,118 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Salom! Men talabalarga yordam beruvchi botman.\n\n"
         "Buyruqlar:\n"
         "/slayd - rasmli, dizaynli PowerPoint (.pptx) tayyorlab beraman\n"
-        "/mustaqil <mavzu> - Word (.docx) fayl tayyorlab beraman\n"
+        "/mustaqil - Word (.docx) mustaqil ish tayyorlab beraman\n"
     )
 
 
-# ===== /slayd suhbati =====
+# ===== Umumiy suhbat (slayd va mustaqil ish uchun) =====
 
 async def slayd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Taqdimot mavzusini yozing:")
+    context.user_data["turi"] = "slayd"
+    await update.message.reply_text("Taqdimot mavzusini kiriting:")
     return MAVZU
 
 
-async def slayd_mavzu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def mustaqil_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["turi"] = "mustaqil"
+    await update.message.reply_text("Mustaqil ish mavzusini kiriting:")
+    return MAVZU
+
+
+async def handle_mavzu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["mavzu"] = update.message.text.strip()
-    await update.message.reply_text(f"Nechta slayd kerak? (1 dan {MAX_SLIDES} gacha)")
+    if context.user_data["turi"] == "slayd":
+        await update.message.reply_text(
+            f"Slayd sahifalari sonini kiriting (1 dan {MAX_COUNT} gacha):"
+        )
+    else:
+        await update.message.reply_text(
+            f"Mustaqil ish sahifalari soni (1 dan {MAX_COUNT} gacha):"
+        )
     return SONI
 
 
-async def slayd_soni(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_soni(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matn = update.message.text.strip()
-    if not matn.isdigit() or not (1 <= int(matn) <= MAX_SLIDES):
-        await update.message.reply_text(f"Iltimos, 1 dan {MAX_SLIDES} gacha son kiriting:")
+    if not matn.isdigit() or not (1 <= int(matn) <= MAX_COUNT):
+        await update.message.reply_text(f"Iltimos, 1 dan {MAX_COUNT} gacha butun son kiriting:")
         return SONI
     context.user_data["soni"] = int(matn)
-    await update.message.reply_text("Tuzuvchi (muallif) ismi va familiyasini yozing:")
+    await update.message.reply_text("Tuzuvchi (muallif) ismi va familiyasini kiriting:")
     return MUALLIF
 
 
-async def slayd_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["muallif"] = update.message.text.strip()
-    await update.message.reply_text("Taqdimot tayyorlanmoqda, biroz kuting...")
-
+    turi = context.user_data["turi"]
     mavzu = context.user_data["mavzu"]
     soni = context.user_data["soni"]
     muallif = context.user_data["muallif"]
 
-    prompt = (
-        f"'{mavzu}' mavzusida taqdimot uchun {soni} ta slaydlik reja tuz. "
-        f"FAQAT quyidagi JSON formatida javob ber, boshqa hech qanday matn yozma:\n"
-        f'{{"slides": [{{"title": "Slayd sarlavhasi", "bullets": '
-        f'["band 1", "band 2", "band 3"]}}]}}\n'
-        f"O'zbek tilida yoz. Aynan {soni} ta slayd bo'lsin, har birida 3-4 ta band."
-    )
-
-    try:
-        javob = ask_ai(prompt)
-        data = extract_json(javob)
-        pptx_file = create_pptx(mavzu, muallif, data["slides"])
-        pptx_file.name = f"{mavzu[:40]}.pptx"
-        await update.message.reply_document(document=pptx_file, filename=pptx_file.name)
-    except Exception as e:
-        await update.message.reply_text(f"Xatolik yuz berdi, qayta urinib ko'ring. ({e})")
+    if turi == "slayd":
+        await update.message.reply_text("Taqdimot tayyorlanmoqda, biroz kuting...")
+        prompt = (
+            f"'{mavzu}' mavzusida taqdimot uchun {soni} ta slaydlik reja tuz. "
+            f"FAQAT quyidagi JSON formatida javob ber, boshqa hech qanday matn yozma:\n"
+            f'{{"slides": [{{"title": "Slayd sarlavhasi", "bullets": '
+            f'["band 1", "band 2", "band 3"]}}]}}\n'
+            f"O'zbek tilida yoz. Aynan {soni} ta slayd bo'lsin, har birida 3-4 ta band."
+        )
+        try:
+            javob = ask_ai(prompt)
+            data = extract_json(javob)
+            pptx_file = create_pptx(mavzu, muallif, data["slides"])
+            pptx_file.name = f"{mavzu[:40]}.pptx"
+            await update.message.reply_document(document=pptx_file, filename=pptx_file.name)
+        except Exception as e:
+            traceback.print_exc()
+            await update.message.reply_text(f"Xatolik yuz berdi, qayta urinib ko'ring. ({e})")
+    else:
+        await update.message.reply_text("Mustaqil ish yozilmoqda, biroz kuting...")
+        soz_soni = soni * 300
+        prompt = (
+            f"'{mavzu}' mavzusida mustaqil ish (referat) yoz, taxminan {soz_soni} so'z "
+            f"(bu {soni} sahifaga teng). Kirish:, Asosiy qism:, Xulosa:, "
+            f"Foydalanilgan adabiyotlar: kabi bo'lim sarlavhalari bilan. "
+            f"O'zbek tilida, ilmiy uslubda yoz."
+        )
+        try:
+            matn = ask_ai(prompt)
+            docx_file = create_docx(mavzu, muallif, matn)
+            docx_file.name = f"{mavzu[:40]}.docx"
+            await update.message.reply_document(document=docx_file, filename=docx_file.name)
+        except Exception as e:
+            traceback.print_exc()
+            await update.message.reply_text(f"Xatolik yuz berdi, qayta urinib ko'ring. ({e})")
 
     context.user_data.clear()
     return ConversationHandler.END
 
 
-async def slayd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Bekor qilindi.")
     return ConversationHandler.END
 
 
-# ===== /mustaqil =====
-
-async def mustaqil(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mavzu = " ".join(context.args)
-    if not mavzu:
-        await update.message.reply_text("Iltimos, mavzuni ham yozing. Masalan:\n/mustaqil Bozor iqtisodiyoti")
-        return
-
-    await update.message.reply_text("Mustaqil ish yozilmoqda, biroz kuting...")
-
-    prompt = (
-        f"'{mavzu}' mavzusida mustaqil ish (referat) yoz. Kirish:, Asosiy qism:, "
-        f"Xulosa:, Foydalanilgan adabiyotlar: kabi bo'lim sarlavhalari bilan. "
-        f"O'zbek tilida, ilmiy uslubda, taxminan 600-800 so'z."
-    )
-
-    try:
-        matn = ask_ai(prompt)
-        docx_file = create_docx(mavzu, matn)
-        docx_file.name = f"{mavzu[:40]}.docx"
-        await update.message.reply_document(document=docx_file, filename=docx_file.name)
-    except Exception as e:
-        await update.message.reply_text(f"Xatolik yuz berdi, qayta urinib ko'ring. ({e})")
-
-
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    slayd_conv = ConversationHandler(
-        entry_points=[CommandHandler("slayd", slayd_start)],
+    conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("slayd", slayd_start),
+            CommandHandler("mustaqil", mustaqil_start),
+        ],
         states={
-            MAVZU: [MessageHandler(filters.TEXT & ~filters.COMMAND, slayd_mavzu)],
-            SONI: [MessageHandler(filters.TEXT & ~filters.COMMAND, slayd_soni)],
-            MUALLIF: [MessageHandler(filters.TEXT & ~filters.COMMAND, slayd_muallif)],
+            MAVZU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mavzu)],
+            SONI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_soni)],
+            MUALLIF: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_muallif)],
         },
-        fallbacks=[CommandHandler("cancel", slayd_cancel)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(slayd_conv)
-    app.add_handler(CommandHandler("mustaqil", mustaqil))
+    app.add_handler(conv)
     print("Bot ishga tushdi...")
     app.run_polling()
 
