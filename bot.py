@@ -309,14 +309,21 @@ async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'"bullets": ["to\'liq va batafsil band 1", "to\'liq va batafsil band 2"]}}]}}\n'
             f"O'zbek tilida yoz (faqat image_query maydoni inglizcha bo'lsin, chunki "
             f"u rasm qidirish uchun ishlatiladi). Aynan {soni} ta slayd bo'lsin, "
-            f"har birida 4-6 ta band, har bir band kamida 12-15 so'zdan iborat, "
+            f"har birida 3-5 ta band, har bir band kamida 10-12 so'zdan iborat, "
             f"aniq va ma'lumotga boy bo'lsin (shunchaki qisqa sarlavha emas, "
             f"to'liq fikr bildiruvchi gap bo'lsin). "
-            f"MUHIM: hech qanday Markdown belgilaridan (**, *, #) foydalanma."
+            f"MUHIM: hech qanday Markdown belgilaridan (**, *, #) foydalanma. "
+            f"MUHIM: javobing FAQAT JSON bo'lsin, tushuntirish yoki boshqa matn yozma, "
+            f"JSON to'liq va yopilgan bo'lishi shart."
         )
         try:
-            javob = ask_ai(prompt, max_tokens=4000)
-            data = extract_json(javob)
+            javob = ask_ai(prompt, max_tokens=6000)
+            try:
+                data = extract_json(javob)
+            except Exception:
+                print("Birinchi urinish muvaffaqiyatsiz, qayta urinilmoqda...")
+                javob = ask_ai(prompt, max_tokens=6000)
+                data = extract_json(javob)
             pptx_file = create_pptx(mavzu, muallif, data["slides"])
             pptx_file.name = f"{mavzu[:40]}.pptx"
             await update.message.reply_document(document=pptx_file, filename=pptx_file.name)
@@ -325,17 +332,22 @@ async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Xatolik yuz berdi, qayta urinib ko'ring. ({e})")
     else:
         await update.message.reply_text("Mustaqil ish yozilmoqda, biroz kuting...")
-        soz_soni = soni * 300
+        soz_soni = soni * 350
         prompt = (
-            f"'{mavzu}' mavzusida mustaqil ish (referat) yoz, taxminan {soz_soni} so'z "
-            f"(bu {soni} sahifaga teng). Kirish:, Asosiy qism:, Xulosa:, "
-            f"Foydalanilgan adabiyotlar: kabi bo'lim sarlavhalari bilan. "
-            f"O'zbek tilida, ilmiy uslubda yoz. "
+            f"'{mavzu}' mavzusida chuqur va batafsil mustaqil ish (referat) yoz, "
+            f"taxminan {soz_soni} so'z (bu {soni} sahifaga teng). "
+            f"Kirish:, Asosiy qism:, Xulosa:, Foydalanilgan adabiyotlar: kabi bo'lim "
+            f"sarlavhalari bilan. Asosiy qismni 2-3 ta kichik mavzuga bo'lib, har "
+            f"birini alohida sarlavha bilan (masalan 'Tarixiy jihatlari:', "
+            f"'Hozirgi holati:' kabi) chuqur yorit. Har bir bo'limda aniq faktlar, "
+            f"misollar va tushuntirishlar bo'lsin - umumiy va yuzaki gaplardan "
+            f"qoching. O'zbek tilida, ilmiy uslubda, professional va ma'lumotga "
+            f"boy qilib yoz. "
             f"MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) foydalanma, "
             f"faqat oddiy toza matn yoz."
         )
         try:
-            matn = ask_ai(prompt)
+            matn = ask_ai(prompt, max_tokens=4000)
             docx_file = create_docx(mavzu, muallif, matn)
             docx_file.name = f"{mavzu[:40]}.docx"
             await update.message.reply_document(document=docx_file, filename=docx_file.name)
