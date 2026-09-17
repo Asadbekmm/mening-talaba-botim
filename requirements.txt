@@ -1,4 +1,5 @@
-python-telegram-bot
-groq
-python-pptx
-python-docx
+   python-telegram-bot
+   groq
+   python-pptx
+   python-docx
+   requests
