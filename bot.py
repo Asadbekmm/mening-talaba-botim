@@ -284,6 +284,57 @@ async def handle_soni(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MUALLIF
 
 
+def generate_outline(mavzu: str, soni: int) -> list:
+    """1-bosqich: faqat slayd sarlavhalari ro'yxatini oladi (qisqa, ishonchli)."""
+    prompt = (
+        f"'{mavzu}' mavzusida {soni} ta slaydlik taqdimot uchun FAQAT slayd "
+        f"sarlavhalari ro'yxatini tuz. FAQAT shu JSON formatida javob ber:\n"
+        f'{{"titles": ["Sarlavha 1", "Sarlavha 2"]}}\n'
+        f"Aynan {soni} ta sarlavha bo'lsin, mavzuni mantiqiy ketma-ketlikda "
+        f"(kirishdan xulosagacha) yoritsin. O'zbek tilida yoz."
+    )
+    javob = ask_ai(prompt, max_tokens=1000)
+    data = extract_json(javob)
+    titles = data["titles"][:soni]
+    while len(titles) < soni:
+        titles.append(f"{mavzu} - qo'shimcha ma'lumot")
+    return titles
+
+
+def generate_slide_content(mavzu: str, title: str) -> dict:
+    """2-bosqich: bitta slayd uchun batafsil bandlar va rasm kalit so'zini oladi."""
+    prompt = (
+        f"Mavzu: '{mavzu}'. Slayd sarlavhasi: '{title}'.\n"
+        f"Shu slayd uchun FAQAT quyidagi JSON formatida javob ber:\n"
+        f'{{"image_query": "2-3 word english keyword", "bullets": '
+        f'["batafsil band 1", "batafsil band 2"]}}\n'
+        f"4-5 ta band yoz, har biri kamida 20-25 so'zdan iborat, to'liq va "
+        f"ma'lumotga boy fikr bo'lsin. Bandlar o'zbek tilida, image_query "
+        f"inglizcha bo'lsin. Markdown belgilaridan (**, *, #) foydalanma."
+    )
+    javob = ask_ai(prompt, max_tokens=1200)
+    return extract_json(javob)
+
+
+def build_slides_data(mavzu: str, soni: int) -> list:
+    titles = generate_outline(mavzu, soni)
+    slides_data = []
+    for title in titles:
+        try:
+            content = generate_slide_content(mavzu, title)
+        except Exception:
+            try:
+                content = generate_slide_content(mavzu, title)
+            except Exception:
+                content = {"image_query": mavzu, "bullets": [f"{title} haqida ma'lumot."]}
+        slides_data.append({
+            "title": title,
+            "image_query": content.get("image_query", mavzu),
+            "bullets": content.get("bullets", []),
+        })
+    return slides_data
+
+
 async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["muallif"] = update.message.text.strip()
     turi = context.user_data["turi"]
@@ -292,31 +343,11 @@ async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     muallif = context.user_data["muallif"]
 
     if turi == "slayd":
-        await update.message.reply_text("Taqdimot tayyorlanmoqda, biroz kuting...")
-        prompt = (
-            f"'{mavzu}' mavzusida chuqur va batafsil taqdimot uchun {soni} ta "
-            f"slaydlik reja tuz. FAQAT quyidagi JSON formatida javob ber, boshqa "
-            f"hech qanday matn yozma:\n"
-            f'{{"slides": [{{"title": "Slayd sarlavhasi", '
-            f'"image_query": "2-3 word english keyword for photo search", '
-            f'"bullets": ["batafsil band 1", "batafsil band 2"]}}]}}\n'
-            f"O'zbek tilida yoz (faqat image_query maydoni inglizcha bo'lsin). "
-            f"Aynan {soni} ta slayd bo'lsin, har birida 4-5 ta band, har bir band "
-            f"kamida 20-25 so'zdan iborat, to'liq va keng yoritilgan, chuqur "
-            f"ma'lumotga boy fikr bo'lsin (qisqa jumlalardan saqlaning, "
-            f"iloji boricha batafsilroq yozing). "
-            f"MUHIM: hech qanday Markdown belgilaridan (**, *, #) foydalanma. "
-            f"MUHIM: javobing FAQAT to'liq va yopilgan JSON bo'lsin."
-        )
+        await update.message.reply_text("Taqdimot tayyorlanmoqda, biroz kuting (bu bir necha o'n soniya davom etishi mumkin)...")
         try:
-            javob = ask_ai(prompt, max_tokens=8000)
-            try:
-                data = extract_json(javob)
-            except Exception:
-                javob = ask_ai(prompt, max_tokens=8000)
-                data = extract_json(javob)
+            slides_data = build_slides_data(mavzu, soni)
 
-            pptx_file, image_errors = create_pptx(mavzu, muallif, data["slides"])
+            pptx_file, image_errors = create_pptx(mavzu, muallif, slides_data)
             pptx_file.name = f"{mavzu[:40]}.pptx"
             await update.message.reply_document(document=pptx_file, filename=pptx_file.name)
 
