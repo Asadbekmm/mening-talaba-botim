@@ -1,33 +1,30 @@
 """
-Talaba Yordamchi Bot (Groq bilan - BEPUL)
-------------------------------------------
+Talaba Yordamchi Bot (Groq bilan - BEPUL, Railway uchun tayyor)
+-----------------------------------------------------------------
 Bu bot Telegram orqali talabalarga:
   /slayd <mavzu>     - slayd mazmuni (rejasi) tayyorlab beradi
   /mustaqil <mavzu>  - mustaqil ish matnini yozib beradi
-
-ISHLATISHDAN OLDIN:
-1. Pastdagi TELEGRAM_TOKEN va GROQ_API_KEY ni o'zingiznikiga almashtiring.
-2. Terminalda: pip install python-telegram-bot groq
-3. Terminalda: python bot.py
 """
 
+import os
 from groq import Groq
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ==== SOZLAMALAR (bu yerlarni to'ldiring) ====
-TELEGRAM_TOKEN = "SIZNING_TELEGRAM_TOKENINGIZ"
-GROQ_API_KEY = "SIZNING_GROQ_API_KALITINGIZ"
-# ================================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
+if not TELEGRAM_TOKEN or not GROQ_API_KEY:
+    raise ValueError(
+        "TELEGRAM_TOKEN yoki GROQ_API_KEY topilmadi! "
+        "Environment variables to'g'ri sozlanganini tekshiring."
+    )
 
 client = Groq(api_key=GROQ_API_KEY)
-
-# Groq'da bepul ishlaydigan kuchli model
 MODEL = "llama-3.3-70b-versatile"
 
 
 def ask_ai(prompt: str) -> str:
-    """Groq AI'ga so'rov yuborib, javobni qaytaradi."""
     response = client.chat.completions.create(
         model=MODEL,
         max_tokens=1500,
@@ -51,9 +48,7 @@ async def slayd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not mavzu:
         await update.message.reply_text("Iltimos, mavzuni ham yozing. Masalan:\n/slayd Ekologik muammolar")
         return
-
     await update.message.reply_text("Slayd tayyorlanmoqda, biroz kuting...")
-
     prompt = (
         f"'{mavzu}' mavzusida taqdimot (prezentatsiya) uchun 8-10 ta slaydlik "
         f"rejani tuzib ber. Har bir slayd uchun: sarlavha va 3-5 ta qisqa band "
@@ -68,9 +63,7 @@ async def mustaqil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not mavzu:
         await update.message.reply_text("Iltimos, mavzuni ham yozing. Masalan:\n/mustaqil Bozor iqtisodiyoti")
         return
-
     await update.message.reply_text("Mustaqil ish yozilmoqda, biroz kuting...")
-
     prompt = (
         f"'{mavzu}' mavzusida mustaqil ish (referat) yoz. Kirish, asosiy qism "
         f"(2-3 bo'lim), xulosa va foydalanilgan adabiyotlar ro'yxatidan iborat "
