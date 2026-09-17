@@ -60,10 +60,10 @@ THEMES = [
 ]
 
 
-def ask_ai(prompt: str) -> str:
+def ask_ai(prompt: str, max_tokens: int = 3000) -> str:
     response = client.chat.completions.create(
         model=MODEL,
-        max_tokens=3000,
+        max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content
@@ -172,12 +172,12 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
         bullets = item.get("bullets", [])
         for i, bullet in enumerate(bullets):
             p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.text = f"•  {bullet}"
-            p.font.size = Pt(18)
+            p.text = f"•  {strip_markdown(bullet)}"
+            p.font.size = Pt(15)
             p.font.color.rgb = theme["text"]
-            p.space_after = Pt(12)
+            p.space_after = Pt(10)
 
-        img_data = get_image(item.get("title", mavzu))
+        img_data = get_image(item.get("image_query", mavzu))
         if img_data:
             try:
                 slide.shapes.add_picture(img_data, img_x, Inches(1.6), width=Inches(5.7), height=Inches(4.8))
@@ -195,6 +195,15 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list) -> BytesIO:
     prs.save(buffer)
     buffer.seek(0)
     return buffer
+
+
+def strip_markdown(text: str) -> str:
+    """AI javobidagi **qalin**, *qiya*, # kabi Markdown belgilarini tozalaydi."""
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^-\s+", "", text, flags=re.MULTILINE)
+    return text
 
 
 def create_docx(mavzu: str, muallif: str, matn: str) -> BytesIO:
@@ -218,6 +227,7 @@ def create_docx(mavzu: str, muallif: str, matn: str) -> BytesIO:
     doc.add_page_break()
 
     # Asosiy matn
+    matn = strip_markdown(matn)
     for paragraph in matn.split("\n"):
         paragraph = paragraph.strip()
         if not paragraph:
@@ -291,14 +301,21 @@ async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if turi == "slayd":
         await update.message.reply_text("Taqdimot tayyorlanmoqda, biroz kuting...")
         prompt = (
-            f"'{mavzu}' mavzusida taqdimot uchun {soni} ta slaydlik reja tuz. "
-            f"FAQAT quyidagi JSON formatida javob ber, boshqa hech qanday matn yozma:\n"
-            f'{{"slides": [{{"title": "Slayd sarlavhasi", "bullets": '
-            f'["band 1", "band 2", "band 3"]}}]}}\n'
-            f"O'zbek tilida yoz. Aynan {soni} ta slayd bo'lsin, har birida 3-4 ta band."
+            f"'{mavzu}' mavzusida chuqur va batafsil taqdimot uchun {soni} ta "
+            f"slaydlik reja tuz. FAQAT quyidagi JSON formatida javob ber, boshqa "
+            f"hech qanday matn yozma:\n"
+            f'{{"slides": [{{"title": "Slayd sarlavhasi", '
+            f'"image_query": "2-3 word english keyword for photo search", '
+            f'"bullets": ["to\'liq va batafsil band 1", "to\'liq va batafsil band 2"]}}]}}\n'
+            f"O'zbek tilida yoz (faqat image_query maydoni inglizcha bo'lsin, chunki "
+            f"u rasm qidirish uchun ishlatiladi). Aynan {soni} ta slayd bo'lsin, "
+            f"har birida 4-6 ta band, har bir band kamida 12-15 so'zdan iborat, "
+            f"aniq va ma'lumotga boy bo'lsin (shunchaki qisqa sarlavha emas, "
+            f"to'liq fikr bildiruvchi gap bo'lsin). "
+            f"MUHIM: hech qanday Markdown belgilaridan (**, *, #) foydalanma."
         )
         try:
-            javob = ask_ai(prompt)
+            javob = ask_ai(prompt, max_tokens=4000)
             data = extract_json(javob)
             pptx_file = create_pptx(mavzu, muallif, data["slides"])
             pptx_file.name = f"{mavzu[:40]}.pptx"
@@ -313,7 +330,9 @@ async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"'{mavzu}' mavzusida mustaqil ish (referat) yoz, taxminan {soz_soni} so'z "
             f"(bu {soni} sahifaga teng). Kirish:, Asosiy qism:, Xulosa:, "
             f"Foydalanilgan adabiyotlar: kabi bo'lim sarlavhalari bilan. "
-            f"O'zbek tilida, ilmiy uslubda yoz."
+            f"O'zbek tilida, ilmiy uslubda yoz. "
+            f"MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) foydalanma, "
+            f"faqat oddiy toza matn yoz."
         )
         try:
             matn = ask_ai(prompt)
