@@ -181,9 +181,9 @@ def create_pptx(mavzu: str, muallif: str, slides_data: list):
         for i, bullet in enumerate(bullets):
             p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
             p.text = f"•  {strip_markdown(bullet)}"
-            p.font.size = Pt(15)
+            p.font.size = Pt(13)
             p.font.color.rgb = theme["text"]
-            p.space_after = Pt(10)
+            p.space_after = Pt(8)
 
         query = item.get("image_query") or item.get("title") or mavzu
         img_data, err = get_image(query)
@@ -302,16 +302,18 @@ async def handle_muallif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'"bullets": ["batafsil band 1", "batafsil band 2"]}}]}}\n'
             f"O'zbek tilida yoz (faqat image_query maydoni inglizcha bo'lsin). "
             f"Aynan {soni} ta slayd bo'lsin, har birida 4-5 ta band, har bir band "
-            f"kamida 12-16 so'zdan iborat aniq va ma'lumotga boy fikr bo'lsin. "
+            f"kamida 20-25 so'zdan iborat, to'liq va keng yoritilgan, chuqur "
+            f"ma'lumotga boy fikr bo'lsin (qisqa jumlalardan saqlaning, "
+            f"iloji boricha batafsilroq yozing). "
             f"MUHIM: hech qanday Markdown belgilaridan (**, *, #) foydalanma. "
             f"MUHIM: javobing FAQAT to'liq va yopilgan JSON bo'lsin."
         )
         try:
-            javob = ask_ai(prompt, max_tokens=7000)
+            javob = ask_ai(prompt, max_tokens=8000)
             try:
                 data = extract_json(javob)
             except Exception:
-                javob = ask_ai(prompt, max_tokens=7000)
+                javob = ask_ai(prompt, max_tokens=8000)
                 data = extract_json(javob)
 
             pptx_file, image_errors = create_pptx(mavzu, muallif, data["slides"])
