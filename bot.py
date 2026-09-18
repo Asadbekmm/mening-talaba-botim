@@ -10,8 +10,10 @@ Qo'shimcha imkoniyatlar:
 - Kunlik so'rov limiti va har-foydalanuvchi navbat (bitta vaqtda bitta so'rov)
 - Umumiy vaqt chegarasi (bot "osilib" qolmasligi uchun)
 - Fan/Bajaruvchi/Qabul qiluvchi ma'lumotlarini SQLite'da eslab qolish
-- Xatolarni SQLite'ga yozish + ixtiyoriy admin xabarnomasi (ADMIN_CHAT_ID)
+- Xatolarni SQLite'ga yozish + ixtiyoriy admin xabarnomasi (ADMIN_CHAT_ID/ADMIN_IDS)
 - "Boshqacha variant" (qayta generatsiya) tugmasi
+- /stats buyrug'i (faqat admin): jami foydalanuvchilar, bugungi yangilar, generatsiyalar soni
+- Yangi foydalanuvchi botga birinchi marta kirganda adminga avtomatik xabar
 """
 
 import os
@@ -55,6 +57,25 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # ixtiyoriy: xatolarni shu chatga yuboradi
+
+
+def _admin_idlarini_ajratish():
+    """ADMIN_IDS (vergul bilan ajratilgan, bir nechta admin uchun) yoki
+    bo'lmasa ADMIN_CHAT_ID'dan foydalanuvchi ID(lar)ini ajratib oladi."""
+    ids = set()
+    xom = os.environ.get("ADMIN_IDS") or os.environ.get("ADMIN_CHAT_ID") or ""
+    for qism in xom.split(","):
+        qism = qism.strip()
+        if qism.lstrip("-").isdigit():
+            ids.add(int(qism))
+    return ids
+
+
+ADMIN_IDS = _admin_idlarini_ajratish()  # /stats buyrug'i va admin xabarnomasi uchun ruxsat etilgan ID'lar
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 # DIQQAT: Railway'da doimiy volume ulanmasa, bu fayl konteyner qayta ishga
 # tushganda o'chib ketadi (profil/limit ma'lumotlari yo'qoladi). Doimiy
@@ -139,8 +160,45 @@ def db_init():
     conn.execute("""CREATE TABLE IF NOT EXISTS xatolar (
         id INTEGER PRIMARY KEY AUTOINCREMENT, vaqt TEXT, user_id INTEGER, joy TEXT, xato TEXT
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY, ism TEXT, username TEXT, birinchi_marta TEXT
+    )""")
     conn.commit()
     conn.close()
+
+
+def foydalanuvchini_royxatga_olish(user_id: int, ism: str, username: str) -> bool:
+    """Foydalanuvchini users jadvaliga yozadi. Birinchi marta ko'rilgan
+    bo'lsa True qaytaradi (adminga xabar berish uchun)."""
+    conn = sqlite3.connect(DB_PATH)
+    mavjud = conn.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone()
+    if mavjud:
+        conn.execute("UPDATE users SET ism=?, username=? WHERE user_id=?", (ism, username, user_id))
+        yangimi = False
+    else:
+        conn.execute(
+            "INSERT INTO users (user_id, ism, username, birinchi_marta) VALUES (?, ?, ?, datetime('now'))",
+            (user_id, ism, username),
+        )
+        yangimi = True
+    conn.commit()
+    conn.close()
+    return yangimi
+
+
+def statistika_olish() -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    jami = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    bugun_yangi = conn.execute("SELECT COUNT(*) FROM users WHERE date(birinchi_marta) = date('now')").fetchone()[0]
+    bugun_generatsiya = conn.execute("SELECT COALESCE(SUM(soni), 0) FROM usage WHERE kun = date('now')").fetchone()[0]
+    jami_generatsiya = conn.execute("SELECT COALESCE(SUM(soni), 0) FROM usage").fetchone()[0]
+    conn.close()
+    return {
+        "jami_foydalanuvchi": jami,
+        "bugun_yangi": bugun_yangi,
+        "bugun_generatsiya": bugun_generatsiya,
+        "jami_generatsiya": jami_generatsiya,
+    }
 
 
 def profil_olish(user_id: int):
@@ -706,7 +764,18 @@ def _flow_tozalash(context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop(k, None)
 
 
+async def _royxatga_olish_va_xabar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    yangi = foydalanuvchini_royxatga_olish(u.id, u.full_name, u.username)
+    if yangi:
+        await adminga_xabar(
+            context,
+            f"🆕 Yangi foydalanuvchi: {u.full_name} (@{u.username or '-'}, id={u.id})",
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _royxatga_olish_va_xabar(update, context)
     await update.message.reply_text(
         "Salom! Men talabalarga yordam beruvchi botman.\n\n"
         "Buyruqlar:\n"
@@ -716,6 +785,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def slayd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _royxatga_olish_va_xabar(update, context)
     user_id = update.effective_user.id
     if user_id in FAOL_FOYDALANUVCHILAR:
         await update.message.reply_text("Sizning oldingi so'rovingiz hali tugallanmadi, biroz kuting.")
@@ -730,6 +800,7 @@ async def slayd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mustaqil_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _royxatga_olish_va_xabar(update, context)
     user_id = update.effective_user.id
     if user_id in FAOL_FOYDALANUVCHILAR:
         await update.message.reply_text("Sizning oldingi so'rovingiz hali tugallanmadi, biroz kuting.")
@@ -741,6 +812,20 @@ async def mustaqil_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["turi"] = "mustaqil"
     await update.message.reply_text("Tilni tanlang:", reply_markup=til_klaviatura())
     return TIL
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Bu buyruq faqat administrator uchun mavjud.")
+        return
+    s = statistika_olish()
+    await update.message.reply_text(
+        "📊 Bot statistikasi\n\n"
+        f"👥 Jami foydalanuvchilar: {s['jami_foydalanuvchi']}\n"
+        f"🆕 Bugun qo'shilganlar: {s['bugun_yangi']}\n"
+        f"📄 Bugungi generatsiyalar: {s['bugun_generatsiya']}\n"
+        f"📄 Jami generatsiyalar: {s['jami_generatsiya']}\n"
+    )
 
 
 async def handle_til(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1001,6 +1086,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(handle_regenerate, pattern="^regen_"))
     print("Bot ishga tushdi...")
