@@ -52,6 +52,8 @@ from pptx.enum.shapes import MSO_SHAPE
 from docx import Document
 from docx.shared import Pt as DocxPt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -107,13 +109,14 @@ MODEL = "openai/gpt-oss-120b"
 MAX_COUNT = 12
 MAX_COUNT_KURSISHI = 35
 SONI_TANLOVLARI = [4, 6, 8, 10, 12]
+SONI_TANLOVLARI_KURSISHI = [10, 15, 20, 25, 30, 35]
 
 
 def max_soni(turi: str) -> int:
     return MAX_COUNT_KURSISHI if turi == "kursish" else MAX_COUNT
 
 # Suhbat holatlari
-TIL, MAVZU, FAN, SONI, TEMA, BAJARUVCHI, QABUL, TASDIQ, TOLOV, TEST_SONI = range(10)
+TIL, MAVZU, UNIVERSITET, FAN, SONI, TEMA, BAJARUVCHI, QABUL, TASDIQ, TOLOV, TEST_SONI = range(11)
 
 TEST_MIN = 5
 TEST_MAX = 30
@@ -134,8 +137,15 @@ LANG = {
         "label": "🇺🇿 O'zbek", "ai_lang": "o'zbek",
         "fan": "Fani", "bajaruvchi": "Bajaruvchi", "qabul": "Qabul qiluvchi",
         "kirish": "Kirish", "asosiy": "Asosiy qism", "xulosa": "Xulosa", "adabiyotlar": "Foydalanilgan adabiyotlar",
+        "mundarija": "Mundarija",
         "mavzu_savol": "Mavzuni kiriting:",
         "mavzu_xato": "Mavzu juda qisqa yoki noto'g'ri. Iltimos, kamida 3 ta harfdan iborat aniq mavzu kiriting:",
+        "universitet_savol": (
+            "Universitet, kurs, yo'nalish va guruh ma'lumotlaringizni kiriting "
+            "(har birini alohida qatorda yozsangiz chiroyliroq chiqadi), masalan:\n\n"
+            "Chirchiq davlat pedagogika universiteti\n"
+            "3-kurs Boshlang'ich ta'lim yo'nalishi 21.2-guruh talabasi"
+        ),
         "fan_savol": "Fan nomini kiriting (masalan: Iqtisodiyot nazariyasi):",
         "bajaruvchi_savol": "Bajaruvchi (talaba) F.I.Sh. kiriting:",
         "qabul_savol": "Qabul qiluvchi (fan o'qituvchisi) F.I.Sh. kiriting:",
@@ -144,8 +154,15 @@ LANG = {
         "label": "🇷🇺 Русский", "ai_lang": "рус",
         "fan": "Предмет", "bajaruvchi": "Исполнитель", "qabul": "Принял",
         "kirish": "Введение", "asosiy": "Основная часть", "xulosa": "Заключение", "adabiyotlar": "Использованная литература",
+        "mundarija": "Содержание",
         "mavzu_savol": "Введите тему:",
         "mavzu_xato": "Тема слишком короткая. Введите тему из минимум 3 букв:",
+        "universitet_savol": (
+            "Введите данные об университете, курсе, направлении и группе "
+            "(лучше каждое с новой строки), например:\n\n"
+            "Чирчикский государственный педагогический университет\n"
+            "3 курс, направление Начальное образование, группа 21.2"
+        ),
         "fan_savol": "Введите название предмета (например: Экономическая теория):",
         "bajaruvchi_savol": "Введите Ф.И.О. исполнителя (студента):",
         "qabul_savol": "Введите Ф.И.О. преподавателя, принимающего работу:",
@@ -154,8 +171,15 @@ LANG = {
         "label": "🇬🇧 English", "ai_lang": "ingliz",
         "fan": "Subject", "bajaruvchi": "Prepared by", "qabul": "Supervisor",
         "kirish": "Introduction", "asosiy": "Main part", "xulosa": "Conclusion", "adabiyotlar": "References",
+        "mundarija": "Contents",
         "mavzu_savol": "Enter the topic:",
         "mavzu_xato": "The topic is too short. Please enter a topic with at least 3 letters:",
+        "universitet_savol": (
+            "Enter your university, course year, field of study and group "
+            "(one per line looks best), for example:\n\n"
+            "Tashkent State Pedagogical University\n"
+            "3rd year, Primary Education, group 21.2"
+        ),
         "fan_savol": "Enter the subject name (e.g. Economics):",
         "bajaruvchi_savol": "Enter the student's full name:",
         "qabul_savol": "Enter the supervising teacher's full name:",
@@ -170,8 +194,14 @@ LANG = {
 def db_init():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""CREATE TABLE IF NOT EXISTS profiles (
-        user_id INTEGER PRIMARY KEY, fan TEXT, bajaruvchi TEXT, qabul TEXT
+        user_id INTEGER PRIMARY KEY, fan TEXT, bajaruvchi TEXT, qabul TEXT, universitet TEXT
     )""")
+    # Eski (universitet ustunisiz) bazalar uchun migratsiya
+    try:
+        conn.execute("ALTER TABLE profiles ADD COLUMN universitet TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS usage (
         user_id INTEGER, kun TEXT, soni INTEGER, PRIMARY KEY (user_id, kun)
     )""")
@@ -221,19 +251,20 @@ def statistika_olish() -> dict:
 
 def profil_olish(user_id: int):
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT fan, bajaruvchi, qabul FROM profiles WHERE user_id=?", (user_id,)).fetchone()
+    row = conn.execute("SELECT fan, bajaruvchi, qabul, universitet FROM profiles WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     if row:
-        return {"fan": row[0], "bajaruvchi": row[1], "qabul": row[2]}
+        return {"fan": row[0], "bajaruvchi": row[1], "qabul": row[2], "universitet": row[3]}
     return None
 
 
-def profil_saqlash(user_id: int, fan: str, bajaruvchi: str, qabul: str):
+def profil_saqlash(user_id: int, fan: str, bajaruvchi: str, qabul: str, universitet: str = ""):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "INSERT INTO profiles (user_id, fan, bajaruvchi, qabul) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET fan=excluded.fan, bajaruvchi=excluded.bajaruvchi, qabul=excluded.qabul",
-        (user_id, fan, bajaruvchi, qabul),
+        "INSERT INTO profiles (user_id, fan, bajaruvchi, qabul, universitet) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET fan=excluded.fan, bajaruvchi=excluded.bajaruvchi, "
+        "qabul=excluded.qabul, universitet=excluded.universitet",
+        (user_id, fan, bajaruvchi, qabul, universitet),
     )
     conn.commit()
     conn.close()
@@ -486,36 +517,128 @@ def create_pptx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, slides_data: 
     return buffer, image_errors
 
 
-def create_docx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, matn: str) -> BytesIO:
+def _sahifa_raqami_qoshish(doc):
+    """Har bir sahifa pastiga o'rtada sahifa raqamini qo'shadi (PAGE maydoni)."""
+    section = doc.sections[0]
+    footer = section.footer
+    p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run()
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = "PAGE"
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+    r_el = run._r
+    r_el.append(fld_begin)
+    r_el.append(instr)
+    r_el.append(fld_end)
+
+
+def _mundarija_qoshish(doc, sarlavha: str):
+    """Avtomatik Mundarija (TOC maydoni) qo'shadi - Word ochilganda
+    'Update Field' bosilsa, bob/kichik mavzular sahifa raqamlari bilan
+    to'ldiriladi."""
+    heading = doc.add_heading(sarlavha, level=1)
+    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    p = doc.add_paragraph()
+    run = p.add_run()
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = 'TOC \\o "1-2" \\h \\z \\u'
+    fld_separate = OxmlElement("w:fldChar")
+    fld_separate.set(qn("w:fldCharType"), "separate")
+    placeholder = OxmlElement("w:t")
+    placeholder.text = "Mundarijani ko'rish uchun sichqonchaning o'ng tugmasini bosib, 'Update Field' ni tanlang."
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+    r_el = run._r
+    r_el.append(fld_begin)
+    r_el.append(instr)
+    r_el.append(fld_separate)
+    r_el.append(placeholder)
+    r_el.append(fld_end)
+    doc.add_page_break()
+
+
+# BOB sarlavhalarini (masalan "I BOB. ...", "II BOB. ...") va kichik
+# mavzularni (masalan "1.1. ...", "2.3. ...") aniqlash uchun naqshlar.
+_BOB_NAQSH = re.compile(r"^(I{1,3}V?|V)\s*[-.\s]?\s*BOB", re.IGNORECASE)
+_KICHIK_MAVZU_NAQSH = re.compile(r"^\d+\.\d+\.?\s")
+
+
+def create_docx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, matn: str, til: str = "uz",
+                 universitet: str = "", ish_turi: str = "") -> BytesIO:
+    L = LANG.get(til, LANG["uz"])
     doc = Document()
-    for _ in range(5):
+    for _ in range(3):
         doc.add_paragraph()
+
+    if universitet:
+        for qator in universitet.splitlines():
+            qator = qator.strip()
+            if not qator:
+                continue
+            up = doc.add_paragraph()
+            up.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r = up.add_run(qator.upper())
+            r.font.size = DocxPt(14)
+            r.font.bold = True
+        doc.add_paragraph()
+
+    if fan:
+        fan_p = doc.add_paragraph()
+        fan_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = fan_p.add_run(f'"{fan}" FANIDAN')
+        r.font.size = DocxPt(14)
+
+    if ish_turi:
+        turi_p = doc.add_paragraph()
+        turi_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = turi_p.add_run(ish_turi.upper())
+        r.font.size = DocxPt(20)
+        r.font.bold = True
+
+    doc.add_paragraph()
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title_p.add_run(mavzu)
-    run.font.size = DocxPt(24)
+    run = title_p.add_run(f"Mavzu: {mavzu}")
+    run.font.size = DocxPt(16)
     run.font.bold = True
 
     doc.add_paragraph()
-    for label, value in [("Fan", fan), ("Bajaruvchi", bajaruvchi), ("Qabul qiluvchi", qabul)]:
+    for label, value in [("Topshirdi", bajaruvchi), ("Qabul qildi", qabul)]:
         info_p = doc.add_paragraph()
         info_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = info_p.add_run(f"{label}: {value}")
         r.font.size = DocxPt(14)
 
     doc.add_page_break()
+    _mundarija_qoshish(doc, L["mundarija"])
 
     matn = strip_markdown(matn)
     for paragraph in matn.split("\n"):
         paragraph = paragraph.strip()
         if not paragraph:
             continue
-        if paragraph.endswith(":") and len(paragraph) < 40:
-            doc.add_heading(paragraph, level=2)
+        sarlavha_matni = paragraph[:-1].strip() if paragraph.endswith(":") else paragraph
+        if _BOB_NAQSH.match(paragraph):
+            doc.add_heading(sarlavha_matni, level=1)
+        elif _KICHIK_MAVZU_NAQSH.match(paragraph):
+            doc.add_heading(sarlavha_matni, level=2)
+        elif paragraph.endswith(":") and len(paragraph) < 40:
+            doc.add_heading(sarlavha_matni, level=1)
         else:
             p = doc.add_paragraph(paragraph)
             for run in p.runs:
                 run.font.size = DocxPt(12)
+
+    _sahifa_raqami_qoshish(doc)
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -710,7 +833,10 @@ async def generate_mustaqil(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
                 await status_msg.edit_text("📦 Fayl yig'ilmoqda...")
             except Exception:
                 pass
-            return await asyncio.to_thread(create_docx, params["mavzu"], params["fan"], params["bajaruvchi"], params["qabul"], matn)
+            return await asyncio.to_thread(
+                create_docx, params["mavzu"], params["fan"], params["bajaruvchi"], params["qabul"], matn, til,
+                params.get("universitet", ""), "Mustaqil ish",
+            )
 
         docx_file = await asyncio.wait_for(ish(), timeout=GEN_TIMEOUT)
         filename = sanitize_filename(params["mavzu"]) + ".docx"
@@ -934,7 +1060,8 @@ async def generate_kursish(context: ContextTypes.DEFAULT_TYPE, chat_id: int, use
             except Exception:
                 pass
             return await asyncio.to_thread(
-                create_docx, params["mavzu"], params["fan"], params["bajaruvchi"], params["qabul"], matn
+                create_docx, params["mavzu"], params["fan"], params["bajaruvchi"], params["qabul"], matn, til,
+                params.get("universitet", ""), "Kurs ishi",
             )
 
         docx_file = await asyncio.wait_for(ish(), timeout=GEN_TIMEOUT)
@@ -986,13 +1113,34 @@ def til_klaviatura() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(v["label"], callback_data=f"til_{k}")] for k, v in LANG.items()])
 
 
-def soni_klaviatura() -> InlineKeyboardMarkup:
-    row1 = [InlineKeyboardButton(str(n), callback_data=f"soni_{n}") for n in SONI_TANLOVLARI]
-    return InlineKeyboardMarkup([row1, [InlineKeyboardButton("✍️ O'zim kiritaman", callback_data="soni_custom")]])
+def soni_klaviatura(turi: str = "mustaqil") -> InlineKeyboardMarkup:
+    tanlovlar = SONI_TANLOVLARI_KURSISHI if turi == "kursish" else SONI_TANLOVLARI
+    # Ko'p tugma bitta qatorga sig'may qolmasligi uchun 3 tadan bo'lib chiqamiz
+    qatorlar = [
+        [InlineKeyboardButton(str(n), callback_data=f"soni_{n}") for n in tanlovlar[i:i + 3]]
+        for i in range(0, len(tanlovlar), 3)
+    ]
+    qatorlar.append([InlineKeyboardButton("✍️ O'zim kiritaman", callback_data="soni_custom")])
+    return InlineKeyboardMarkup(qatorlar)
+
+
+def _soni_matn_turi(turi: str) -> str:
+    """SONI bosqichida foydalanuvchiga ko'rsatiladigan so'z: kurs ishi/mustaqil
+    ish uchun 'sahifa', slayd uchun 'slayd'."""
+    return "slayd" if turi == "slayd" else "sahifa"
 
 
 def tema_klaviatura() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(name, callback_data=f"tema_{i}")] for i, name in enumerate(THEME_NAMES)])
+
+
+def universitet_keyboard(user_id: int):
+    p = profil_olish(user_id)
+    if p and p.get("universitet"):
+        # Tugma matni juda uzun bo'lib ketmasligi uchun qisqartiramiz
+        qisqa = p["universitet"].splitlines()[0][:40]
+        return InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ {qisqa}...", callback_data="prof_universitet")]])
+    return None
 
 
 def bajaruvchi_keyboard(user_id: int):
@@ -1009,7 +1157,7 @@ def qabul_keyboard(user_id: int):
     return None
 
 
-FLOW_KALITLARI = ["turi", "til", "mavzu", "fan", "soni", "tema_idx", "bajaruvchi", "qabul", "_outline"]
+FLOW_KALITLARI = ["turi", "til", "mavzu", "universitet", "fan", "soni", "tema_idx", "bajaruvchi", "qabul", "_outline"]
 
 
 def _flow_tozalash(context: ContextTypes.DEFAULT_TYPE):
@@ -1031,7 +1179,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _royxatga_olish_va_xabar(update, context)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
     await update.message.reply_text(
-        "Salom! Men talabalarga yordam beruvchi botman.\n\n"
+        "👋 Assalomu alaykum, talaba!\n\n"
+        "O‘qish va topshiriqlar bilan qiynalyapsizmi?\n"
+        "Men sizning eng yaqin Talaba Yordamchi botingizman! 🎓\n\n"
+        "Men nimalar qila olaman?\n"
+        "📝 Istalgan mavzuda mukammal Mustaqil ishlar tayyorlash;\n"
+        "📊 Chiroyli va kreativ Slaydlar (Prezentatsiyalar) yaratish;\n"
+        "⏱ Vaqtingizni tejash va darslaringizni a'lo baholarga yopish.\n\n"
+        "💻 Dasturchi: KIRGIZBAYEV ASADBEK\n\n"
+        "Boshlash uchun pastdagi kerakli buyruqni bering!👇\n\n"
         "Buyruqlar:\n"
         "/slayd - rasmli, dizaynli PowerPoint (.pptx) tayyorlab beraman\n"
         "/mustaqil - Word (.docx) mustaqil ish tayyorlab beraman\n"
@@ -1168,6 +1324,32 @@ async def handle_mavzu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Nechta savol kerak? ({TEST_MIN} dan {TEST_MAX} gacha):")
         return TEST_SONI
 
+    if context.user_data["turi"] in ("mustaqil", "kursish"):
+        kb = universitet_keyboard(update.effective_user.id)
+        await update.message.reply_text(LANG[til]["universitet_savol"], reply_markup=kb)
+        return UNIVERSITET
+
+    p = profil_olish(update.effective_user.id)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ {p['fan']}", callback_data="prof_fan")]]) if (p and p.get("fan")) else None
+    await update.message.reply_text(LANG[til]["fan_savol"], reply_markup=kb)
+    return FAN
+
+
+async def handle_universitet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    p = profil_olish(update.effective_user.id)
+    context.user_data["universitet"] = (p or {}).get("universitet", "")
+    til = context.user_data.get("til", "uz")
+    p2 = profil_olish(update.effective_user.id)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ {p2['fan']}", callback_data="prof_fan")]]) if (p2 and p2.get("fan")) else None
+    await query.edit_message_text(LANG[til]["fan_savol"], reply_markup=kb)
+    return FAN
+
+
+async def handle_universitet_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["universitet"] = update.message.text.strip()
+    til = context.user_data.get("til", "uz")
     p = profil_olish(update.effective_user.id)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ {p['fan']}", callback_data="prof_fan")]]) if (p and p.get("fan")) else None
     await update.message.reply_text(LANG[til]["fan_savol"], reply_markup=kb)
@@ -1179,15 +1361,19 @@ async def handle_fan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     p = profil_olish(update.effective_user.id)
     context.user_data["fan"] = (p or {}).get("fan", "")
-    limit = max_soni(context.user_data["turi"])
-    await query.edit_message_text(f"Sahifalar soni (1 dan {limit} gacha):", reply_markup=soni_klaviatura())
+    turi = context.user_data["turi"]
+    limit = max_soni(turi)
+    soz = _soni_matn_turi(turi)
+    await query.edit_message_text(f"{soz.capitalize()}lar soni (1 dan {limit} gacha):", reply_markup=soni_klaviatura(turi))
     return SONI
 
 
 async def handle_fan_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["fan"] = update.message.text.strip()
-    limit = max_soni(context.user_data["turi"])
-    await update.message.reply_text(f"Sahifalar soni (1 dan {limit} gacha):", reply_markup=soni_klaviatura())
+    turi = context.user_data["turi"]
+    limit = max_soni(turi)
+    soz = _soni_matn_turi(turi)
+    await update.message.reply_text(f"{soz.capitalize()}lar soni (1 dan {limit} gacha):", reply_markup=soni_klaviatura(turi))
     return SONI
 
 
@@ -1203,9 +1389,11 @@ async def handle_soni_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     til = context.user_data.get("til", "uz")
     query = update.callback_query
     await query.answer()
-    limit = max_soni(context.user_data["turi"])
+    turi = context.user_data["turi"]
+    limit = max_soni(turi)
     if query.data == "soni_custom":
-        await query.edit_message_text(f"Nechta sahifa/slayd kerak, kiriting (1-{limit}):", reply_markup=None)
+        soz = _soni_matn_turi(turi)
+        await query.edit_message_text(f"Nechta {soz} kerak, kiriting (1-{limit}):", reply_markup=None)
         return SONI
     context.user_data["soni"] = int(query.data.replace("soni_", ""))
     matn, kb, keyingi = await _soni_keyingi_qadam(context, update.effective_user.id, til)
@@ -1260,8 +1448,10 @@ async def tasdiqga_otish(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_
     turi = user_data["turi"]
     til = user_data.get("til", "uz")
     L = LANG[til]
-    matn = (
-        "📋 Tekshiring:\n\n"
+    matn = "📋 Tekshiring:\n\n"
+    if user_data.get("universitet"):
+        matn += f"Universitet: {user_data['universitet']}\n"
+    matn += (
         f"Mavzu: {user_data['mavzu']}\n"
         f"{L['fan']}: {user_data['fan']}\n"
         f"Soni: {user_data['soni']}\n"
@@ -1319,6 +1509,7 @@ async def handle_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     turi = context.user_data["turi"]
     params = {
         "mavzu": context.user_data["mavzu"],
+        "universitet": context.user_data.get("universitet", ""),
         "fan": context.user_data["fan"],
         "soni": context.user_data["soni"],
         "bajaruvchi": context.user_data["bajaruvchi"],
@@ -1327,7 +1518,7 @@ async def handle_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "tema_idx": context.user_data.get("tema_idx"),
         "outline": context.user_data.get("_outline"),
     }
-    profil_saqlash(user_id, params["fan"], params["bajaruvchi"], params["qabul"])
+    profil_saqlash(user_id, params["fan"], params["bajaruvchi"], params["qabul"], params["universitet"])
     context.user_data[f"oxirgi_{turi}"] = params
     _flow_tozalash(context)
 
@@ -1520,6 +1711,10 @@ def main():
         states={
             TIL: [CallbackQueryHandler(handle_til, pattern="^til_")],
             MAVZU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mavzu)],
+            UNIVERSITET: [
+                CallbackQueryHandler(handle_universitet_callback, pattern="^prof_universitet$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_universitet_text),
+            ],
             FAN: [
                 CallbackQueryHandler(handle_fan_callback, pattern="^prof_fan$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_fan_text),
