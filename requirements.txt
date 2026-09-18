@@ -1,5 +1,5 @@
-   python-telegram-bot
-   groq
-   python-pptx
-   python-docx
-   requests
+python-telegram-bot[webhooks]
+groq
+python-pptx
+python-docx
+requests
