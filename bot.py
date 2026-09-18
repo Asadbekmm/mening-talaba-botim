@@ -58,6 +58,16 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # ixtiyoriy: xatolarni shu chatga yuboradi
 
+# --- Kurs ishi to'lovi uchun sozlamalar ---
+PAYMENT_CARD_NUMBER = os.environ.get("PAYMENT_CARD_NUMBER", "4073 4200 4135 6589")
+PAYMENT_CARD_OWNER = os.environ.get("PAYMENT_CARD_OWNER", "Kirgizbayev Asadbek")
+PAYMENT_PRICE = os.environ.get("PAYMENT_PRICE", "10 000 so'm")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "wwasadbek")
+MAX_BOB = 2  # kurs ishi uchun maksimal bob soni
+
+# Tasdiqlanishi kutilayotgan to'lovlar: {order_id: {"chat_id":, "user_id":, "params":}}
+PENDING_ORDERS = {}
+
 
 def _admin_idlarini_ajratish():
     """ADMIN_IDS (vergul bilan ajratilgan, bir nechta admin uchun) yoki
@@ -98,7 +108,7 @@ MAX_COUNT = 12
 SONI_TANLOVLARI = [4, 6, 8, 10, 12]
 
 # Suhbat holatlari
-TIL, MAVZU, FAN, SONI, TEMA, BAJARUVCHI, QABUL, TASDIQ = range(8)
+TIL, MAVZU, FAN, SONI, TEMA, BAJARUVCHI, QABUL, TASDIQ, TOLOV = range(9)
 
 # Bitta vaqtda faqat bitta so'rov generatsiya qilinishi uchun (xotirada)
 FAOL_FOYDALANUVCHILAR = set()
@@ -732,6 +742,81 @@ async def generate_mustaqil(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
         FAOL_FOYDALANUVCHILAR.discard(user_id)
 
 
+async def generate_kursish(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, params: dict):
+    """Kurs ishi generatsiyasi - maksimal 2 bobli, ilmiy darajadagi hujjat.
+    To'lov admin tomonidan tasdiqlangandan keyingina chaqiriladi."""
+    til = params["til"]
+    L = LANG[til]
+    status_msg = await context.bot.send_message(chat_id, "⏳ Kurs ishi yozilmoqda, biroz kuting...")
+    try:
+        async def ish():
+            soz_soni = params["soni"] * 400
+            ai_lang = L["ai_lang"]
+            prompt = (
+                f"'{params['mavzu']}' mavzusida ({params['fan']} fanidan) ilmiy darajadagi, "
+                f"chuqur, ishonarli va sifatli KURS ISHI yoz, taxminan {soz_soni} so'z (bu "
+                f"{params['soni']} sahifaga teng). Tuzilma qat'iy quyidagicha bo'lsin: "
+                f"{L['kirish']}: (mavzuning dolzarbligi, maqsad va vazifalar), so'ng aynan "
+                f"'I BOB. <bob nomi>:' va uning ichida '1.1. <kichik mavzu>:' va "
+                f"'1.2. <kichik mavzu>:', so'ng aynan 'II BOB. <bob nomi>:' va uning ichida "
+                f"'2.1. <kichik mavzu>:' va '2.2. <kichik mavzu>:', so'ng {L['xulosa']}:, "
+                f"so'ng {L['adabiyotlar']}:. "
+                f"MUHIM: JAMI FAQAT IKKITA BOB bo'lsin, uchinchi bob yozma. Har bir kichik "
+                f"mavzuda aniq ilmiy faktlar, chuqur tahlil, real misollar va mantiqiy "
+                f"xulosalar bo'lsin - yuzaki, umumiy va qisqa gaplardan qat'iy saqlaning. "
+                f"Professional ilmiy-akademik uslubda, {ai_lang} tilida yoz. "
+                f"MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) foydalanma."
+            )
+            matn = await asyncio.to_thread(ask_ai, prompt, 7000)
+            try:
+                await status_msg.edit_text("📦 Fayl yig'ilmoqda...")
+            except Exception:
+                pass
+            return await asyncio.to_thread(
+                create_docx, params["mavzu"], params["fan"], params["bajaruvchi"], params["qabul"], matn
+            )
+
+        docx_file = await asyncio.wait_for(ish(), timeout=GEN_TIMEOUT)
+        filename = sanitize_filename(params["mavzu"]) + " (kurs ishi).docx"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = os.path.join(tmpdir, filename)
+            with open(docx_path, "wb") as f:
+                f.write(docx_file.getvalue())
+            with open(docx_path, "rb") as f:
+                await context.bot.send_document(chat_id, document=f, filename=filename)
+            usage_oshirish(user_id)
+
+            pdf_path, pdf_err = await asyncio.to_thread(docx_to_pdf, docx_path, tmpdir)
+            if pdf_path and os.path.exists(pdf_path):
+                pdf_filename = sanitize_filename(params["mavzu"]) + " (kurs ishi).pdf"
+                with open(pdf_path, "rb") as f:
+                    await context.bot.send_document(chat_id, document=f, filename=pdf_filename)
+            elif pdf_err:
+                xato_yozish(user_id, "pdf_convert_kursish", pdf_err)
+
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
+        await context.bot.send_message(
+            chat_id,
+            "Eslatma: matn sun'iy intellekt yordamida tuzilgan - taqdim etishdan oldin albatta "
+            "o'qib chiqing, faktlarni tekshiring va universitetingizning qoidalariga rioya qiling. "
+            "Savol yoki muammo bo'lsa, admin bilan bog'laning.",
+            reply_markup=kb,
+        )
+    except asyncio.TimeoutError:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
+        await context.bot.send_message(chat_id, "⏱ Vaqt chegarasidan oshib ketdi. Admin bilan bog'laning:", reply_markup=kb)
+        xato_yozish(user_id, "kursish_timeout", "timeout")
+    except Exception as e:
+        traceback.print_exc()
+        xato_yozish(user_id, "kursish", e)
+        await adminga_xabar(context, f"Xato (kursish) user={user_id}: {e}")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
+        await context.bot.send_message(chat_id, f"Xatolik yuz berdi. Admin bilan bog'laning:", reply_markup=kb)
+    finally:
+        FAOL_FOYDALANUVCHILAR.discard(user_id)
+
+
 # ---------------------------------------------------------------------------
 # Telegram handlerlar
 # ---------------------------------------------------------------------------
@@ -783,12 +868,35 @@ async def _royxatga_olish_va_xabar(update: Update, context: ContextTypes.DEFAULT
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _royxatga_olish_va_xabar(update, context)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
     await update.message.reply_text(
         "Salom! Men talabalarga yordam beruvchi botman.\n\n"
         "Buyruqlar:\n"
         "/slayd - rasmli, dizaynli PowerPoint (.pptx) tayyorlab beraman\n"
         "/mustaqil - Word (.docx) mustaqil ish tayyorlab beraman\n"
+        f"/kursish - ilmiy darajadagi kurs ishi ({PAYMENT_PRICE}, maks. {MAX_BOB} bob)\n",
+        reply_markup=kb,
     )
+
+
+async def kursish_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _royxatga_olish_va_xabar(update, context)
+    user_id = update.effective_user.id
+    if user_id in FAOL_FOYDALANUVCHILAR:
+        await update.message.reply_text("Sizning oldingi so'rovingiz hali tugallanmadi, biroz kuting.")
+        return ConversationHandler.END
+    if bugungi_soni(user_id) >= DAILY_LIMIT:
+        await update.message.reply_text(f"Bugungi limit ({DAILY_LIMIT} ta)ga yetdingiz. Ertaga qayta urinib ko'ring.")
+        return ConversationHandler.END
+    _flow_tozalash(context)
+    context.user_data["turi"] = "kursish"
+    await update.message.reply_text(
+        f"📘 Kurs ishi xizmati - narxi: {PAYMENT_PRICE}\n"
+        f"(ilmiy darajada, maksimal {MAX_BOB} bobdan iborat tayyorlanadi)\n\n"
+        "Tilni tanlang:",
+        reply_markup=til_klaviatura(),
+    )
+    return TIL
 
 
 async def slayd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1012,6 +1120,26 @@ async def handle_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[f"oxirgi_{turi}"] = params
     _flow_tozalash(context)
 
+    if turi == "kursish":
+        order_id = f"{user_id}_{int(time.time())}"
+        PENDING_ORDERS[order_id] = {
+            "chat_id": update.effective_chat.id,
+            "user_id": user_id,
+            "params": params,
+        }
+        context.user_data["_order_id"] = order_id
+        matn = (
+            "💳 To'lov ma'lumotlari\n\n"
+            f"Narxi: {PAYMENT_PRICE}\n"
+            f"Karta raqami: {PAYMENT_CARD_NUMBER}\n"
+            f"Karta egasi: {PAYMENT_CARD_OWNER}\n\n"
+            "To'lovni amalga oshirgach, chek (screenshot) rasmini shu yerga yuboring. "
+            "Admin tasdiqlagach, kurs ishingiz avtomatik yuboriladi."
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
+        await query.edit_message_text(matn, reply_markup=kb)
+        return TOLOV
+
     FAOL_FOYDALANUVCHILAR.add(user_id)
     await query.edit_message_text("⏳ Boshlanmoqda...", reply_markup=None)
     chat_id = update.effective_chat.id
@@ -1020,6 +1148,120 @@ async def handle_tasdiq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await generate_mustaqil(context, chat_id, user_id, params)
     return ConversationHandler.END
+
+
+async def handle_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    order_id = context.user_data.get("_order_id")
+    order = PENDING_ORDERS.get(order_id)
+    if not order:
+        await update.message.reply_text(
+            "Xatolik: buyurtma topilmadi (muddati o'tgan bo'lishi mumkin). Iltimos, /kursish dan qaytadan boshlang."
+        )
+        return ConversationHandler.END
+
+    params = order["params"]
+    u = update.effective_user
+    caption = (
+        "🆕 Yangi to'lov (kurs ishi)\n\n"
+        f"Foydalanuvchi: {u.full_name} (@{u.username or '-'}, id={u.id})\n"
+        f"Mavzu: {params['mavzu']}\n"
+        f"Fan: {params['fan']}\n"
+        f"Bajaruvchi: {params['bajaruvchi']}\n"
+        f"Qabul qiluvchi: {params['qabul']}\n"
+        f"Sahifalar soni: {params['soni']}\n"
+        f"Narxi: {PAYMENT_PRICE}"
+    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_ha_{order_id}"),
+        InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_yoq_{order_id}"),
+    ]])
+
+    if ADMIN_CHAT_ID:
+        try:
+            await context.bot.send_photo(
+                chat_id=ADMIN_CHAT_ID,
+                photo=update.message.photo[-1].file_id,
+                caption=caption,
+                reply_markup=kb,
+            )
+        except Exception as e:
+            xato_yozish(u.id, "payment_forward", e)
+            await update.message.reply_text(
+                "Kechirasiz, adminga yuborishda xatolik yuz berdi. Iltimos, admin bilan to'g'ridan-to'g'ri bog'laning."
+            )
+            return ConversationHandler.END
+    else:
+        await update.message.reply_text("Xatolik: ADMIN_CHAT_ID sozlanmagan. Admin bilan bog'laning.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "✅ To'lov qabul qilindi va adminga yuborildi.\n"
+        "Admin tekshirib tasdiqlagach, kurs ishingiz avtomatik ravishda shu yerga yuboriladi. "
+        "Iltimos, biroz kuting."
+    )
+    context.user_data.pop("_order_id", None)
+    return ConversationHandler.END
+
+
+async def handle_payment_wrong_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Iltimos, to'lov chekining rasmini (screenshot) yuboring, matn emas."
+    )
+    return TOLOV
+
+
+async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    is_approve = data.startswith("admin_ha_")
+    order_id = data.replace("admin_ha_", "").replace("admin_yoq_", "")
+    order = PENDING_ORDERS.pop(order_id, None)
+
+    if not order:
+        try:
+            await query.edit_message_caption(
+                caption=(query.message.caption or "") + "\n\n⚠️ Buyurtma topilmadi (allaqachon ko'rib chiqilgan).",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        return
+
+    chat_id = order["chat_id"]
+    user_id = order["user_id"]
+    params = order["params"]
+
+    if is_approve:
+        try:
+            await query.edit_message_caption(
+                caption=(query.message.caption or "") + "\n\n✅ Tasdiqlandi",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        if user_id in FAOL_FOYDALANUVCHILAR:
+            await context.bot.send_message(chat_id, "So'rovingiz tasdiqlandi, lekin boshqa jarayon band - biroz kuting.")
+            return
+
+        FAOL_FOYDALANUVCHILAR.add(user_id)
+        await context.bot.send_message(chat_id, "✅ To'lovingiz tasdiqlandi! Kurs ishingiz tayyorlanmoqda...")
+        await generate_kursish(context, chat_id, user_id, params)
+    else:
+        try:
+            await query.edit_message_caption(
+                caption=(query.message.caption or "") + "\n\n❌ Rad etildi",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
+        await context.bot.send_message(
+            chat_id,
+            "❌ To'lovingiz tasdiqlanmadi. Agar bu xato deb hisoblasangiz, admin bilan bog'laning:",
+            reply_markup=kb,
+        )
 
 
 async def handle_regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1061,6 +1303,7 @@ def main():
         entry_points=[
             CommandHandler("slayd", slayd_start),
             CommandHandler("mustaqil", mustaqil_start),
+            CommandHandler("kursish", kursish_start),
         ],
         states={
             TIL: [CallbackQueryHandler(handle_til, pattern="^til_")],
@@ -1083,11 +1326,16 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_qabul_text),
             ],
             TASDIQ: [CallbackQueryHandler(handle_tasdiq, pattern="^tasdiq_")],
+            TOLOV: [
+                MessageHandler(filters.PHOTO, handle_payment_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_wrong_type),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
             CommandHandler("slayd", slayd_start),
             CommandHandler("mustaqil", mustaqil_start),
+            CommandHandler("kursish", kursish_start),
         ],
         allow_reentry=True,
     )
@@ -1096,6 +1344,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(handle_regenerate, pattern="^regen_"))
+    app.add_handler(CallbackQueryHandler(handle_admin_decision, pattern="^admin_(ha|yoq)_"))
     print("Bot ishga tushdi...")
     app.run_polling()
 
