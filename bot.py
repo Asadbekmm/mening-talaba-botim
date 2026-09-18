@@ -267,15 +267,22 @@ async def adminga_xabar(context: ContextTypes.DEFAULT_TYPE, matn: str):
 # Yordamchi funksiyalar
 # ---------------------------------------------------------------------------
 
-def ask_ai(prompt: str, max_tokens: int = 3000, max_retries: int = 3) -> str:
+def ask_ai(prompt: str, max_tokens: int = 3000, max_retries: int = 3, reasoning_effort: str = "low") -> str:
     """Groq'ga so'rov yuboradi. Vaqtinchalik rate-limit/overload xatolarida
-    kichik kutish bilan qayta urinadi."""
+    kichik kutish bilan qayta urinadi.
+
+    MUHIM: openai/gpt-oss-120b "fikrlovchi" (reasoning) model - u javobdan
+    oldin ichki fikrlash tokenlarini ham sarflaydi, va ular ham max_tokens
+    hisobiga kiradi. Agar max_tokens kichik bo'lsa, fikrlash tugagach haqiqiy
+    JSON javobga joy qolmasligi va u yarim yo'lda kesilib qolishi mumkin.
+    Shu sababli reasoning_effort="low" bilan fikrlashni kamaytiramiz va
+    har bir chaqiruv uchun yetarlicha katta max_tokens beramiz."""
     delay = 2
     last_err = None
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
-                model=MODEL, max_tokens=max_tokens,
+                model=MODEL, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.choices[0].message.content
@@ -511,7 +518,7 @@ def generate_outline(mavzu: str, soni: int, til: str) -> list:
         f"Aynan {soni} ta sarlavha bo'lsin, mavzuni mantiqiy ketma-ketlikda yoritsin. "
         f"{ai_lang} tilida yoz."
     )
-    data = extract_json(ask_ai(prompt, max_tokens=1000))
+    data = extract_json(ask_ai(prompt, max_tokens=2000))
     titles = [t for t in data["titles"][:soni] if t and str(t).strip()]
     while len(titles) < soni:
         titles.append(f"{mavzu} - qo'shimcha ma'lumot")
@@ -528,7 +535,7 @@ def generate_slide_content(mavzu: str, title: str, til: str) -> dict:
         f"4-5 ta band yoz, har biri kamida 20-25 so'zdan iborat bo'lsin. Bandlar {ai_lang} "
         f"tilida, image_query albatta inglizcha bo'lsin. Markdown belgilaridan foydalanma."
     )
-    data = extract_json(ask_ai(prompt, max_tokens=1200))
+    data = extract_json(ask_ai(prompt, max_tokens=3000))
     bullets = [b.strip() for b in data.get("bullets", []) if b and b.strip()]
     if len(bullets) < 2:
         raise ValueError(f"'{title}' uchun AI bo'sh/qisqa javob qaytardi")
@@ -543,7 +550,7 @@ def generate_conclusion_slide(mavzu: str, til: str) -> dict:
         f'["xulosa band 1", "xulosa band 2"]}}\n'
         f"3-4 ta band yoz, asosiy xulosalarni jamlab bersin. {ai_lang} tilida yoz."
     )
-    data = extract_json(ask_ai(prompt, max_tokens=800))
+    data = extract_json(ask_ai(prompt, max_tokens=1500))
     bullets = [b.strip() for b in data.get("bullets", []) if b and b.strip()]
     if not bullets:
         raise ValueError("Xulosa bo'sh qaytdi")
@@ -557,7 +564,7 @@ def generate_references_slide(mavzu: str, til: str) -> dict:
         f'FAQAT shu JSON formatida ber: {{"bullets": ["1. Muallif F. Kitob nomi. Nashriyot, yil.", "2. ..."]}}\n'
         f"{ai_lang} tilida, akademik formatda yoz."
     )
-    data = extract_json(ask_ai(prompt, max_tokens=600))
+    data = extract_json(ask_ai(prompt, max_tokens=1200))
     bullets = [b.strip() for b in data.get("bullets", []) if b and b.strip()]
     if not bullets:
         raise ValueError("Adabiyotlar ro'yxati bo'sh qaytdi")
@@ -680,7 +687,7 @@ async def generate_mustaqil(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
                 f"bo'lsin. {ai_lang} tilida, ilmiy uslubda, professional va ma'lumotga boy qilib yoz. "
                 f"MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) foydalanma."
             )
-            matn = await asyncio.to_thread(ask_ai, prompt, 5000)
+            matn = await asyncio.to_thread(ask_ai, prompt, 7000)
             try:
                 await status_msg.edit_text("📦 Fayl yig'ilmoqda...")
             except Exception:
