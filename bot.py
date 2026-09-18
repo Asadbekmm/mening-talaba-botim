@@ -105,10 +105,18 @@ client = Groq(api_key=GROQ_API_KEY)
 MODEL = "openai/gpt-oss-120b"
 
 MAX_COUNT = 12
+MAX_COUNT_KURSISHI = 35
 SONI_TANLOVLARI = [4, 6, 8, 10, 12]
 
+
+def max_soni(turi: str) -> int:
+    return MAX_COUNT_KURSISHI if turi == "kursish" else MAX_COUNT
+
 # Suhbat holatlari
-TIL, MAVZU, FAN, SONI, TEMA, BAJARUVCHI, QABUL, TASDIQ, TOLOV = range(9)
+TIL, MAVZU, FAN, SONI, TEMA, BAJARUVCHI, QABUL, TASDIQ, TOLOV, TEST_SONI = range(10)
+
+TEST_MIN = 5
+TEST_MAX = 30
 
 # Bitta vaqtda faqat bitta so'rov generatsiya qilinishi uchun (xotirada)
 FAOL_FOYDALANUVCHILAR = set()
@@ -742,32 +750,185 @@ async def generate_mustaqil(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
         FAOL_FOYDALANUVCHILAR.discard(user_id)
 
 
+def generate_test_batch(mavzu: str, til: str, count: int) -> list:
+    """Bitta so'rovda `count` ta test savoli (4 variantli) yaratadi."""
+    ai_lang = LANG[til]["ai_lang"]
+    prompt = (
+        f"'{mavzu}' mavzusi bo'yicha aynan {count} ta test (nazorat) savoli tuz. "
+        f"Har biri 4 ta variantli (A, B, C, D) bo'lsin, faqat bittasi to'g'ri javob. "
+        f"FAQAT quyidagi JSON formatida javob ber:\n"
+        f'{{"savollar": [{{"savol": "Savol matni", "variantlar": '
+        f'{{"A": "...", "B": "...", "C": "...", "D": "..."}}, "togri": "A"}}]}}\n'
+        f"Savollar turli qiyinlik darajasida, mavzuni har xil qirralaridan yoritsin, "
+        f"takrorlanmasin. {ai_lang} tilida yoz. Markdown belgilaridan foydalanma."
+    )
+    data = extract_json(ask_ai(prompt, max_tokens=4000))
+    savollar = data.get("savollar", [])
+    natija = []
+    for s in savollar[:count]:
+        variantlar = s.get("variantlar", {})
+        togri = str(s.get("togri", "")).strip().upper()
+        if not s.get("savol") or len(variantlar) < 4 or togri not in ("A", "B", "C", "D"):
+            continue
+        natija.append({"savol": strip_markdown(s["savol"]), "variantlar": variantlar, "togri": togri})
+    return natija
+
+
+async def build_test_savollari(mavzu: str, til: str, soni: int, status_msg) -> list:
+    savollar = []
+    BATCH = 8
+    qoldi = soni
+    while qoldi > 0 and len(savollar) < soni:
+        batch_soni = min(BATCH, qoldi)
+        try:
+            yangi = await asyncio.to_thread(generate_test_batch, mavzu, til, batch_soni)
+        except Exception:
+            yangi = []
+        if not yangi:
+            qoldi -= batch_soni
+            continue
+        savollar.extend(yangi)
+        qoldi -= batch_soni
+        try:
+            await status_msg.edit_text(f"⏳ Savollar tayyorlanmoqda... {min(len(savollar), soni)}/{soni}")
+        except Exception:
+            pass
+    return savollar[:soni]
+
+
+def create_test_docx(mavzu: str, savollar: list) -> BytesIO:
+    doc = Document()
+    title_p = doc.add_paragraph()
+    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title_p.add_run(f"Test: {mavzu}")
+    run.font.size = DocxPt(20)
+    run.font.bold = True
+    doc.add_paragraph()
+
+    for i, s in enumerate(savollar, start=1):
+        p = doc.add_paragraph()
+        r = p.add_run(f"{i}. {s['savol']}")
+        r.font.size = DocxPt(12)
+        r.font.bold = True
+        for harf in ["A", "B", "C", "D"]:
+            vp = doc.add_paragraph(f"   {harf}) {s['variantlar'].get(harf, '')}")
+            for run in vp.runs:
+                run.font.size = DocxPt(12)
+        doc.add_paragraph()
+
+    doc.add_page_break()
+    doc.add_heading("Javoblar kaliti", level=2)
+    javoblar_matni = ",  ".join(f"{i}-{s['togri']}" for i, s in enumerate(savollar, start=1))
+    doc.add_paragraph(javoblar_matni)
+
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+async def generate_test(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, mavzu: str, til: str, soni: int):
+    status_msg = await context.bot.send_message(chat_id, f"⏳ Savollar tayyorlanmoqda... 0/{soni}")
+    try:
+        savollar = await asyncio.wait_for(
+            build_test_savollari(mavzu, til, soni, status_msg), timeout=GEN_TIMEOUT
+        )
+        if not savollar:
+            raise ValueError("Savollar yaratilmadi, qaytadan urinib ko'ring")
+
+        try:
+            await status_msg.edit_text("📦 Fayl yig'ilmoqda...")
+        except Exception:
+            pass
+
+        docx_file = await asyncio.to_thread(create_test_docx, mavzu, savollar)
+        filename = sanitize_filename(mavzu) + " (test).docx"
+        docx_file.name = filename
+        await context.bot.send_document(chat_id, document=docx_file, filename=filename)
+        usage_oshirish(user_id)
+
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
+        await context.bot.send_message(
+            chat_id,
+            "Eslatma: savollar sun'iy intellekt yordamida tuzilgan - foydalanishdan oldin "
+            "to'g'ri javoblarni tekshirib chiqing.",
+            reply_markup=kb,
+        )
+    except asyncio.TimeoutError:
+        await context.bot.send_message(chat_id, "⏱ Vaqt chegarasidan oshib ketdi, qaytadan urinib ko'ring.")
+        xato_yozish(user_id, "test_timeout", "timeout")
+    except Exception as e:
+        traceback.print_exc()
+        xato_yozish(user_id, "test", e)
+        await adminga_xabar(context, f"Xato (test) user={user_id}: {e}")
+        await context.bot.send_message(chat_id, f"Xatolik yuz berdi, qayta urinib ko'ring. ({e})")
+    finally:
+        FAOL_FOYDALANUVCHILAR.discard(user_id)
+
+
 async def generate_kursish(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, params: dict):
     """Kurs ishi generatsiyasi - maksimal 2 bobli, ilmiy darajadagi hujjat.
+    35 sahifagacha ishonchli ishlashi uchun bo'limlar alohida-alohida so'raladi
+    (bitta katta so'rov katta hajmda kesilib qolishi mumkin edi).
     To'lov admin tomonidan tasdiqlangandan keyingina chaqiriladi."""
     til = params["til"]
     L = LANG[til]
+    mavzu = params["mavzu"]
+    fan = params["fan"]
+    ai_lang = L["ai_lang"]
+    soni = params["soni"]
     status_msg = await context.bot.send_message(chat_id, "⏳ Kurs ishi yozilmoqda, biroz kuting...")
     try:
-        async def ish():
-            soz_soni = params["soni"] * 400
-            ai_lang = L["ai_lang"]
+        async def bolim_yoz(nomi: str, korsatma: str, soz: int, max_tok: int) -> str:
+            try:
+                await status_msg.edit_text(f"⏳ {nomi} yozilmoqda...")
+            except Exception:
+                pass
             prompt = (
-                f"'{params['mavzu']}' mavzusida ({params['fan']} fanidan) ilmiy darajadagi, "
-                f"chuqur, ishonarli va sifatli KURS ISHI yoz, taxminan {soz_soni} so'z (bu "
-                f"{params['soni']} sahifaga teng). Tuzilma qat'iy quyidagicha bo'lsin: "
-                f"{L['kirish']}: (mavzuning dolzarbligi, maqsad va vazifalar), so'ng aynan "
-                f"'I BOB. <bob nomi>:' va uning ichida '1.1. <kichik mavzu>:' va "
-                f"'1.2. <kichik mavzu>:', so'ng aynan 'II BOB. <bob nomi>:' va uning ichida "
-                f"'2.1. <kichik mavzu>:' va '2.2. <kichik mavzu>:', so'ng {L['xulosa']}:, "
-                f"so'ng {L['adabiyotlar']}:. "
-                f"MUHIM: JAMI FAQAT IKKITA BOB bo'lsin, uchinchi bob yozma. Har bir kichik "
-                f"mavzuda aniq ilmiy faktlar, chuqur tahlil, real misollar va mantiqiy "
-                f"xulosalar bo'lsin - yuzaki, umumiy va qisqa gaplardan qat'iy saqlaning. "
-                f"Professional ilmiy-akademik uslubda, {ai_lang} tilida yoz. "
-                f"MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) foydalanma."
+                f"'{mavzu}' mavzusida ({fan} fanidan) yozilayotgan ilmiy kurs ishining "
+                f"bitta qismini yoz. {korsatma} Taxminan {soz} so'zdan iborat bo'lsin. "
+                f"Aniq ilmiy faktlar, chuqur tahlil, real misollar va mantiqiy fikrlar bilan, "
+                f"yuzaki/umumiy gaplardan saqlanib yoz. Professional ilmiy-akademik uslubda, "
+                f"{ai_lang} tilida yoz. MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) "
+                f"foydalanma. Faqat so'ralgan qismni yoz, boshqa izoh qo'shma."
             )
-            matn = await asyncio.to_thread(ask_ai, prompt, 7000)
+            return await asyncio.to_thread(ask_ai, prompt, max_tok)
+
+        async def ish():
+            # Har bir bo'lim uchun so'z hajmi umumiy hajmdan nisbatan olinadi,
+            # lekin bitta so'rov kesilib qolmasligi uchun yuqori chegara bilan cheklanadi.
+            kirish_soz = min(soni * 40, 700)
+            bob_soz = min(soni * 150, 2500)
+            yakun_soz = min(soni * 40, 700)
+
+            kirish = await bolim_yoz(
+                L["kirish"],
+                f"Faqat '{L['kirish']}:' qismini yoz - mavzuning dolzarbligi, ishning "
+                f"maqsadi va vazifalari haqida.",
+                kirish_soz, 1800,
+            )
+            bob1 = await bolim_yoz(
+                "I BOB",
+                "Faqat 'I BOB. <bob nomi>:' qismini yoz, ichida '1.1. <kichik mavzu>:' va "
+                "'1.2. <kichik mavzu>:' bo'lsin (bob nomini mavzuga mos ravishda o'zing tanla).",
+                bob_soz, 4000,
+            )
+            bob2 = await bolim_yoz(
+                "II BOB",
+                "Faqat 'II BOB. <bob nomi>:' qismini yoz, ichida '2.1. <kichik mavzu>:' va "
+                "'2.2. <kichik mavzu>:' bo'lsin (bob nomini mavzuga mos ravishda o'zing tanla, "
+                "I BOB'dan farqli va uni davom ettiruvchi bo'lsin).",
+                bob_soz, 4000,
+            )
+            yakun = await bolim_yoz(
+                f"{L['xulosa']} va {L['adabiyotlar']}",
+                f"Faqat '{L['xulosa']}:' (asosiy xulosalar) va so'ng '{L['adabiyotlar']}:' "
+                f"(4-6 ta namunaviy manba, akademik formatda) qismlarini yoz.",
+                yakun_soz, 1800,
+            )
+
+            matn = "\n\n".join([kirish, bob1, bob2, yakun])
+
             try:
                 await status_msg.edit_text("📦 Fayl yig'ilmoqda...")
             except Exception:
@@ -874,7 +1035,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Buyruqlar:\n"
         "/slayd - rasmli, dizaynli PowerPoint (.pptx) tayyorlab beraman\n"
         "/mustaqil - Word (.docx) mustaqil ish tayyorlab beraman\n"
-        f"/kursishi - ilmiy darajadagi kurs ishi ({PAYMENT_PRICE}, maks. {MAX_BOB} bob)\n",
+        f"/kursishi - ilmiy darajadagi kurs ishi ({PAYMENT_PRICE}, maks. {MAX_BOB} bob)\n"
+        f"/test - test/nazorat savollari generatori ({TEST_MIN}-{TEST_MAX} ta savol)\n",
         reply_markup=kb,
     )
 
@@ -897,6 +1059,46 @@ async def kursish_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=til_klaviatura(),
     )
     return TIL
+
+
+async def test_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _royxatga_olish_va_xabar(update, context)
+    user_id = update.effective_user.id
+    if user_id in FAOL_FOYDALANUVCHILAR:
+        await update.message.reply_text("Sizning oldingi so'rovingiz hali tugallanmadi, biroz kuting.")
+        return ConversationHandler.END
+    if bugungi_soni(user_id) >= DAILY_LIMIT:
+        await update.message.reply_text(f"Bugungi limit ({DAILY_LIMIT} ta)ga yetdingiz. Ertaga qayta urinib ko'ring.")
+        return ConversationHandler.END
+    _flow_tozalash(context)
+    context.user_data["turi"] = "test"
+    await update.message.reply_text(
+        "📝 Test/nazorat savollari generatori\n\nTilni tanlang:",
+        reply_markup=til_klaviatura(),
+    )
+    return TIL
+
+
+async def handle_test_soni(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    matn_raw = update.message.text.strip()
+    if not matn_raw.isdigit() or not (TEST_MIN <= int(matn_raw) <= TEST_MAX):
+        await update.message.reply_text(f"Iltimos, {TEST_MIN} dan {TEST_MAX} gacha butun son kiriting:")
+        return TEST_SONI
+
+    soni = int(matn_raw)
+    mavzu = context.user_data["mavzu"]
+    til = context.user_data.get("til", "uz")
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    _flow_tozalash(context)
+
+    if bugungi_soni(user_id) >= DAILY_LIMIT:
+        await update.message.reply_text(f"Bugungi limit ({DAILY_LIMIT} ta)ga yetdingiz. Ertaga qayta urinib ko'ring.")
+        return ConversationHandler.END
+
+    FAOL_FOYDALANUVCHILAR.add(user_id)
+    await generate_test(context, chat_id, user_id, mavzu, til, soni)
+    return ConversationHandler.END
 
 
 async def slayd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -961,6 +1163,11 @@ async def handle_mavzu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(LANG[til]["mavzu_xato"])
         return MAVZU
     context.user_data["mavzu"] = matn
+
+    if context.user_data["turi"] == "test":
+        await update.message.reply_text(f"Nechta savol kerak? ({TEST_MIN} dan {TEST_MAX} gacha):")
+        return TEST_SONI
+
     p = profil_olish(update.effective_user.id)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ {p['fan']}", callback_data="prof_fan")]]) if (p and p.get("fan")) else None
     await update.message.reply_text(LANG[til]["fan_savol"], reply_markup=kb)
@@ -972,13 +1179,15 @@ async def handle_fan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     p = profil_olish(update.effective_user.id)
     context.user_data["fan"] = (p or {}).get("fan", "")
-    await query.edit_message_text(f"Sahifalar soni (1 dan {MAX_COUNT} gacha):", reply_markup=soni_klaviatura())
+    limit = max_soni(context.user_data["turi"])
+    await query.edit_message_text(f"Sahifalar soni (1 dan {limit} gacha):", reply_markup=soni_klaviatura())
     return SONI
 
 
 async def handle_fan_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["fan"] = update.message.text.strip()
-    await update.message.reply_text(f"Sahifalar soni (1 dan {MAX_COUNT} gacha):", reply_markup=soni_klaviatura())
+    limit = max_soni(context.user_data["turi"])
+    await update.message.reply_text(f"Sahifalar soni (1 dan {limit} gacha):", reply_markup=soni_klaviatura())
     return SONI
 
 
@@ -994,8 +1203,9 @@ async def handle_soni_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     til = context.user_data.get("til", "uz")
     query = update.callback_query
     await query.answer()
+    limit = max_soni(context.user_data["turi"])
     if query.data == "soni_custom":
-        await query.edit_message_text(f"Nechta sahifa/slayd kerak, kiriting (1-{MAX_COUNT}):", reply_markup=None)
+        await query.edit_message_text(f"Nechta sahifa/slayd kerak, kiriting (1-{limit}):", reply_markup=None)
         return SONI
     context.user_data["soni"] = int(query.data.replace("soni_", ""))
     matn, kb, keyingi = await _soni_keyingi_qadam(context, update.effective_user.id, til)
@@ -1006,8 +1216,9 @@ async def handle_soni_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_soni_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     til = context.user_data.get("til", "uz")
     matn_raw = update.message.text.strip()
-    if not matn_raw.isdigit() or not (1 <= int(matn_raw) <= MAX_COUNT):
-        await update.message.reply_text(f"Iltimos, 1 dan {MAX_COUNT} gacha butun son kiriting:")
+    limit = max_soni(context.user_data["turi"])
+    if not matn_raw.isdigit() or not (1 <= int(matn_raw) <= limit):
+        await update.message.reply_text(f"Iltimos, 1 dan {limit} gacha butun son kiriting:")
         return SONI
     context.user_data["soni"] = int(matn_raw)
     matn, kb, keyingi = await _soni_keyingi_qadam(context, update.effective_user.id, til)
@@ -1304,6 +1515,7 @@ def main():
             CommandHandler("slayd", slayd_start),
             CommandHandler("mustaqil", mustaqil_start),
             CommandHandler("kursishi", kursish_start),
+            CommandHandler("test", test_start),
         ],
         states={
             TIL: [CallbackQueryHandler(handle_til, pattern="^til_")],
@@ -1330,12 +1542,14 @@ def main():
                 MessageHandler(filters.PHOTO, handle_payment_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_wrong_type),
             ],
+            TEST_SONI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_test_soni)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
             CommandHandler("slayd", slayd_start),
             CommandHandler("mustaqil", mustaqil_start),
             CommandHandler("kursishi", kursish_start),
+            CommandHandler("test", test_start),
         ],
         allow_reentry=True,
     )
@@ -1345,8 +1559,29 @@ def main():
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(handle_regenerate, pattern="^regen_"))
     app.add_handler(CallbackQueryHandler(handle_admin_decision, pattern="^admin_(ha|yoq)_"))
-    print("Bot ishga tushdi...")
-    app.run_polling()
+
+    # --- Webhook sozlamalari (Railway uchun) ---
+    # WEBHOOK_URL: Railway domeningiz, masalan https://sizning-bot.up.railway.app
+    # Agar WEBHOOK_URL o'rnatilmagan bo'lsa, bot avtomatik ravishda polling
+    # rejimiga tushadi (masalan, lokal kompyuterda ishga tushirganda).
+    webhook_url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+    port = int(os.environ.get("PORT", "8080"))
+    # Tokenni URL yo'lida ishlatamiz - bu boshqalar webhook manzilini
+    # topib olib, botga soxta so'rov yubormasligi uchun oddiy himoya.
+    webhook_path = TELEGRAM_TOKEN
+
+    if webhook_url:
+        print(f"Bot webhook rejimida ishga tushmoqda: {webhook_url}/{webhook_path}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=webhook_path,
+            webhook_url=f"{webhook_url}/{webhook_path}",
+            drop_pending_updates=True,
+        )
+    else:
+        print("WEBHOOK_URL topilmadi, bot polling rejimida ishga tushmoqda...")
+        app.run_polling()
 
 
 if __name__ == "__main__":
