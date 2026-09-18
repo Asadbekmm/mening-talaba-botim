@@ -874,7 +874,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Buyruqlar:\n"
         "/slayd - rasmli, dizaynli PowerPoint (.pptx) tayyorlab beraman\n"
         "/mustaqil - Word (.docx) mustaqil ish tayyorlab beraman\n"
-        f"/kursish - ilmiy darajadagi kurs ishi ({PAYMENT_PRICE}, maks. {MAX_BOB} bob)\n",
+        f"/kursishi - ilmiy darajadagi kurs ishi ({PAYMENT_PRICE}, maks. {MAX_BOB} bob)\n",
         reply_markup=kb,
     )
 
@@ -1155,7 +1155,7 @@ async def handle_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYP
     order = PENDING_ORDERS.get(order_id)
     if not order:
         await update.message.reply_text(
-            "Xatolik: buyurtma topilmadi (muddati o'tgan bo'lishi mumkin). Iltimos, /kursish dan qaytadan boshlang."
+            "Xatolik: buyurtma topilmadi (muddati o'tgan bo'lishi mumkin). Iltimos, /kursishi dan qaytadan boshlang."
         )
         return ConversationHandler.END
 
@@ -1303,7 +1303,7 @@ def main():
         entry_points=[
             CommandHandler("slayd", slayd_start),
             CommandHandler("mustaqil", mustaqil_start),
-            CommandHandler("kursish", kursish_start),
+            CommandHandler("kursishi", kursish_start),
         ],
         states={
             TIL: [CallbackQueryHandler(handle_til, pattern="^til_")],
@@ -1335,7 +1335,7 @@ def main():
             CommandHandler("cancel", cancel),
             CommandHandler("slayd", slayd_start),
             CommandHandler("mustaqil", mustaqil_start),
-            CommandHandler("kursish", kursish_start),
+            CommandHandler("kursishi", kursish_start),
         ],
         allow_reentry=True,
     )
