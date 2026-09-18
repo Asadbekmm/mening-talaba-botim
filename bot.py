@@ -537,33 +537,61 @@ def _sahifa_raqami_qoshish(doc):
     r_el.append(fld_end)
 
 
-def _mundarija_qoshish(doc, sarlavha: str):
-    """Avtomatik Mundarija (TOC maydoni) qo'shadi - Word ochilganda
-    'Update Field' bosilsa, bob/kichik mavzular sahifa raqamlari bilan
-    to'ldiriladi."""
+def _majburiy_yangilash_yoqish(doc):
+    """Word hujjatni ochganda Mundarija va sahifa raqamlari kabi barcha
+    maydonlarni AVTOMATIK yangilaydi - foydalanuvchi qo'lda sichqoncha
+    o'ng tugmasini bosib 'Update Field' tanlashi shart bo'lmaydi."""
+    settings = doc.settings.element
+    update_fields = OxmlElement("w:updateFields")
+    update_fields.set(qn("w:val"), "true")
+    settings.append(update_fields)
+
+
+def _mundarija_qoshish(doc, sarlavha: str, royxat):
+    """Mundarijani STATIK (oddiy) matn sifatida qo'shadi: bob va kichik
+    mavzular nomlari ro'yxati hujjat ochilgan ZAHOTI ko'rinadi - Word,
+    Google Docs, WPS, telefon ilovalari, PDF-ko'rish - qaysi dasturda
+    ochilmasin, 'Update Field' bosish shart emas.
+
+    royxat: [(matn, level), ...] - level 1 = bob, level 2 = kichik mavzu.
+    Aniq sahifa raqami ko'rsatilmaydi, chunki uni oldindan (hujjat hali
+    render qilinmasdan) hisoblashning imkoni yo'q.
+    """
     heading = doc.add_heading(sarlavha, level=1)
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    p = doc.add_paragraph()
-    run = p.add_run()
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(qn("w:fldCharType"), "begin")
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
-    instr.text = 'TOC \\o "1-2" \\h \\z \\u'
-    fld_separate = OxmlElement("w:fldChar")
-    fld_separate.set(qn("w:fldCharType"), "separate")
-    placeholder = OxmlElement("w:t")
-    placeholder.text = "Mundarijani ko'rish uchun sichqonchaning o'ng tugmasini bosib, 'Update Field' ni tanlang."
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(qn("w:fldCharType"), "end")
-    r_el = run._r
-    r_el.append(fld_begin)
-    r_el.append(instr)
-    r_el.append(fld_separate)
-    r_el.append(placeholder)
-    r_el.append(fld_end)
+    if not royxat:
+        doc.add_paragraph("(Bo'limlar aniqlanmadi)")
+    else:
+        for matn, level in royxat:
+            p = doc.add_paragraph()
+            run = p.add_run(matn)
+            if level == 2:
+                p.paragraph_format.left_indent = DocxPt(24)
+                run.font.size = DocxPt(11)
+            else:
+                run.font.size = DocxPt(12)
+                run.font.bold = True
+
     doc.add_page_break()
+
+
+def _mundarija_royxatini_yigish(matn: str):
+    """Matnni oldindan skanerlab, Mundarijada ko'rsatiladigan bob/kichik
+    mavzu sarlavhalarini (matn, level) ko'rinishida ro'yxat qilib qaytaradi."""
+    royxat = []
+    for qator in matn.split("\n"):
+        qator = qator.strip()
+        if not qator:
+            continue
+        sarlavha_matni = qator[:-1].strip() if qator.endswith(":") else qator
+        if _BOB_NAQSH.match(qator):
+            royxat.append((sarlavha_matni, 1))
+        elif _KICHIK_MAVZU_NAQSH.match(qator):
+            royxat.append((sarlavha_matni, 2))
+        elif qator.endswith(":") and len(qator) < 40:
+            royxat.append((sarlavha_matni, 1))
+    return royxat
 
 
 # BOB sarlavhalarini (masalan "I BOB. ...", "II BOB. ...") va kichik
@@ -619,9 +647,11 @@ def create_docx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, matn: str, ti
         r.font.size = DocxPt(14)
 
     doc.add_page_break()
-    _mundarija_qoshish(doc, L["mundarija"])
 
     matn = strip_markdown(matn)
+    mundarija_royxati = _mundarija_royxatini_yigish(matn)
+    _mundarija_qoshish(doc, L["mundarija"], mundarija_royxati)
+
     for paragraph in matn.split("\n"):
         paragraph = paragraph.strip()
         if not paragraph:
@@ -639,6 +669,7 @@ def create_docx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, matn: str, ti
                 run.font.size = DocxPt(12)
 
     _sahifa_raqami_qoshish(doc)
+    _majburiy_yangilash_yoqish(doc)
 
     buffer = BytesIO()
     doc.save(buffer)
