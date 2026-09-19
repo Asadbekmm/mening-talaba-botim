@@ -51,6 +51,8 @@ from pptx.enum.shapes import MSO_SHAPE
 
 from docx import Document
 from docx.shared import Pt as DocxPt
+from docx.shared import RGBColor as DocxRGBColor
+from docx.shared import Inches as DocxInches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -138,6 +140,7 @@ LANG = {
         "fan": "Fani", "bajaruvchi": "Bajaruvchi", "qabul": "Qabul qiluvchi",
         "kirish": "Kirish", "asosiy": "Asosiy qism", "xulosa": "Xulosa", "adabiyotlar": "Foydalanilgan adabiyotlar",
         "mundarija": "Mundarija",
+        "ilovalar": "Ilovalar",
         "mavzu_savol": "Mavzuni kiriting:",
         "mavzu_xato": "Mavzu juda qisqa yoki noto'g'ri. Iltimos, kamida 3 ta harfdan iborat aniq mavzu kiriting:",
         "universitet_savol": (
@@ -155,6 +158,7 @@ LANG = {
         "fan": "Предмет", "bajaruvchi": "Исполнитель", "qabul": "Принял",
         "kirish": "Введение", "asosiy": "Основная часть", "xulosa": "Заключение", "adabiyotlar": "Использованная литература",
         "mundarija": "Содержание",
+        "ilovalar": "Приложения",
         "mavzu_savol": "Введите тему:",
         "mavzu_xato": "Тема слишком короткая. Введите тему из минимум 3 букв:",
         "universitet_savol": (
@@ -172,6 +176,7 @@ LANG = {
         "fan": "Subject", "bajaruvchi": "Prepared by", "qabul": "Supervisor",
         "kirish": "Introduction", "asosiy": "Main part", "xulosa": "Conclusion", "adabiyotlar": "References",
         "mundarija": "Contents",
+        "ilovalar": "Appendices",
         "mavzu_savol": "Enter the topic:",
         "mavzu_xato": "The topic is too short. Please enter a topic with at least 3 letters:",
         "universitet_savol": (
@@ -347,6 +352,14 @@ def ask_ai(prompt: str, max_tokens: int = 3000, max_retries: int = 3, reasoning_
     raise last_err
 
 
+def _progress_bar(bosqich: int, jami: int, uzunlik: int = 10) -> str:
+    """Oddiy matnli progress-bar hosil qiladi, masalan: [▓▓▓▓░░░░░░] 40%"""
+    jami = max(jami, 1)
+    foiz = min(100, max(0, round(bosqich / jami * 100)))
+    tolgan = round(uzunlik * foiz / 100)
+    return f"[{'▓' * tolgan}{'░' * (uzunlik - tolgan)}] {foiz}%"
+
+
 def strip_markdown(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = re.sub(r"\*(.*?)\*", r"\1", text)
@@ -376,9 +389,11 @@ def mavzu_yaroqlimi(matn: str) -> bool:
     return len(harflar) >= 2
 
 
-def get_image(query: str, per_page: int = 5):
+def get_image(query: str, per_page: int = 6, ishlatilgan: set | None = None):
     """Pexels'dan bir nechta natija olib, eng yuqori sifatlisini tanlaydi.
-    Qaytaradi: (BytesIO yoki None, sabab_matni)"""
+    `ishlatilgan` to'plami berilsa, avval boshqa slaydda ishlatilgan rasm
+    (id bo'yicha) qayta tanlanmaydi - har bir slaydda boshqa rasm chiqishi
+    uchun. Qaytaradi: (BytesIO yoki None, sabab_matni)"""
     if not PEXELS_API_KEY:
         return None, "PEXELS_API_KEY sozlanmagan (Railway Variables'da yo'q)"
     try:
@@ -395,7 +410,14 @@ def get_image(query: str, per_page: int = 5):
         photos = resp.json().get("photos", [])
         if not photos:
             return None, f"'{query}' uchun rasm topilmadi"
-        best = max(photos, key=lambda ph: ph.get("width", 0))
+        photos.sort(key=lambda ph: ph.get("width", 0), reverse=True)
+        if ishlatilgan is not None:
+            yangi = [ph for ph in photos if ph.get("id") not in ishlatilgan]
+            if yangi:
+                photos = yangi
+        best = photos[0]
+        if ishlatilgan is not None:
+            ishlatilgan.add(best.get("id"))
         img_resp = requests.get(best["src"]["large"], timeout=15)
         if img_resp.status_code != 200:
             return None, "Rasm faylini yuklab bo'lmadi"
@@ -467,6 +489,7 @@ def create_pptx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, slides_data: 
         p2.space_after = Pt(6)
 
     total = len(slides_data)
+    ishlatilgan_rasmlar = set()
 
     for idx, item in enumerate(slides_data, start=1):
         slide = prs.slides.add_slide(blank)
@@ -495,8 +518,16 @@ def create_pptx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, slides_data: 
             p.font.color.rgb = theme["text"]
             p.space_after = Pt(8)
 
-        query = item.get("image_query") or item.get("title") or mavzu
-        img_data, err = get_image(query)
+        # Rasm qidiruvini mavzu konteksti bilan birga so'raymiz - shunda
+        # har bir slayd nafaqat boshqa-boshqa, balki mavzuga ham mosroq
+        # rasm oladi (masalan faqat "tarix" emas, "tarix Buyuk ipak yo'li").
+        asosiy_soz = item.get("image_query") or item.get("title") or mavzu
+        query = f"{asosiy_soz} {mavzu}" if asosiy_soz != mavzu else mavzu
+        img_data, err = get_image(query, ishlatilgan=ishlatilgan_rasmlar)
+        if not img_data and err:
+            # Kontekst bilan boyitilgan so'rov natija bermasa, sodda so'rov
+            # bilan yana bir bor urinib ko'ramiz.
+            img_data, err = get_image(asosiy_soz, ishlatilgan=ishlatilgan_rasmlar)
         if img_data:
             try:
                 slide.shapes.add_picture(img_data, img_x, Inches(1.6), width=Inches(5.7), height=Inches(4.8))
@@ -576,22 +607,50 @@ def _mundarija_qoshish(doc, sarlavha: str, royxat):
     doc.add_page_break()
 
 
-def _mundarija_royxatini_yigish(matn: str):
+def _mundarija_royxatini_yigish(matn: str, turi: str = "mustaqil"):
     """Matnni oldindan skanerlab, Mundarijada ko'rsatiladigan bob/kichik
-    mavzu sarlavhalarini (matn, level) ko'rinishida ro'yxat qilib qaytaradi."""
+    mavzu sarlavhalarini (matn, level) ko'rinishida ro'yxat qilib qaytaradi.
+    Agar hech qanday sarlavha aniqlanmasa (AI formatga rioya qilmagan bo'lsa),
+    Mundarija umuman bo'sh chiqib ketmasligi uchun standart bo'lim nomlari
+    (Kirish/Bob/Xulosa/Adabiyotlar) bilan to'ldiriladi - shu bilan Mundarija
+    hech qachon "yo'qolib qolmaydi"."""
     royxat = []
     for qator in matn.split("\n"):
         qator = qator.strip()
         if not qator:
             continue
-        sarlavha_matni = qator[:-1].strip() if qator.endswith(":") else qator
+        sarlavha, _ = _sarlavha_va_qolgan_matn(qator)
         if _BOB_NAQSH.match(qator):
-            royxat.append((sarlavha_matni, 1))
+            royxat.append((sarlavha, 1))
         elif _KICHIK_MAVZU_NAQSH.match(qator):
-            royxat.append((sarlavha_matni, 2))
-        elif qator.endswith(":") and len(qator) < 40:
-            royxat.append((sarlavha_matni, 1))
-    return royxat
+            royxat.append((sarlavha, 2))
+        elif qator.endswith(":") and len(qator) < 60:
+            royxat.append((sarlavha, 1))
+
+    if royxat:
+        return royxat
+
+    # --- Zaxira (fallback) ro'yxat: hech qanday sarlavha topilmasa ---
+    L = LANG["uz"]
+    if turi == "kursish":
+        return [(L["kirish"], 1), ("I BOB", 1), ("II BOB", 1), (L["xulosa"], 1), (L["adabiyotlar"], 1)]
+    return [(L["kirish"], 1), (L["asosiy"], 1), (L["xulosa"], 1), (L["adabiyotlar"], 1)]
+
+
+def _sarlavha_va_qolgan_matn(paragraph: str):
+    """Bir paragraf ichida sarlavha VA undan keyingi asosiy matn bitta
+    qatorga yopishib qolgan bo'lsa (AI ba'zan shunday yozadi), ularni
+    ajratadi: (sarlavha, qolgan_matn). Agar paragraf faqat sarlavhadan
+    iborat bo'lsa (qisqa), qolgan_matn bo'sh qaytadi."""
+    toza = paragraph[:-1].strip() if paragraph.endswith(":") else paragraph
+    if len(toza) <= 90:
+        return toza, ""
+    m = re.match(r"^(.{5,90}?[.:])\s+(\S.*)$", toza, flags=re.DOTALL)
+    if m:
+        return m.group(1).rstrip(".:").strip(), m.group(2).strip()
+    # Tabiiy chegara topilmadi - ehtiyot chorasi sifatida birinchi 90 ta
+    # belgini sarlavha, qolganini matn deb olamiz.
+    return toza[:90].strip(), toza[90:].strip()
 
 
 # BOB sarlavhalarini (masalan "I BOB. ...", "II BOB. ...") va kichik
@@ -600,73 +659,246 @@ _BOB_NAQSH = re.compile(r"^(I{1,3}V?|V)\s*[-.\s]?\s*BOB", re.IGNORECASE)
 _KICHIK_MAVZU_NAQSH = re.compile(r"^\d+\.\d+\.?\s")
 
 
+def generate_ilova_jadval(mavzu: str, fan: str, til: str) -> dict | None:
+    """Kurs ishi uchun mavzuga oid oddiy jadval (Ilova) ma'lumotlarini AI
+    orqali yaratadi. Muvaffaqiyatsiz bo'lsa None qaytaradi (ixtiyoriy bo'lim,
+    hujjatning qolgan qismiga ta'sir qilmasligi kerak)."""
+    ai_lang = LANG[til]["ai_lang"]
+    prompt = (
+        f"'{mavzu}' mavzusi ({fan} fanidan) bo'yicha kurs ishining ILOVASI uchun mos "
+        f"keladigan qisqa, aniq ma'lumotlar jadvalini tuz (masalan taqqoslash, "
+        f"bosqichlar, ko'rsatkichlar va h.k. - mavzuga eng mos turini o'zing tanla). "
+        f"FAQAT quyidagi JSON formatida javob ber:\n"
+        f'{{"sarlavha": "Jadval nomi", "ustunlar": ["Ustun1", "Ustun2", "Ustun3"], '
+        f'"qatorlar": [["...", "...", "..."], ["...", "...", "..."]]}}\n'
+        f"3-4 ta ustun, 4-6 ta qator bo'lsin. {ai_lang} tilida yoz."
+    )
+    try:
+        data = extract_json(ask_ai(prompt, max_tokens=1200))
+        ustunlar = data.get("ustunlar", [])
+        qatorlar = data.get("qatorlar", [])
+        if not ustunlar or not qatorlar:
+            return None
+        return {"sarlavha": data.get("sarlavha", "Jadval"), "ustunlar": ustunlar, "qatorlar": qatorlar}
+    except Exception:
+        return None
+
+
+def generate_ilova_chizma_malumot(mavzu: str, fan: str, til: str) -> dict | None:
+    """Kurs ishi Ilovasi uchun oddiy diagramma (masalan ustunli diagramma)
+    ma'lumotlarini AI orqali yaratadi. Muvaffaqiyatsiz bo'lsa None qaytaradi."""
+    ai_lang = LANG[til]["ai_lang"]
+    prompt = (
+        f"'{mavzu}' mavzusi ({fan} fanidan) bo'yicha kurs ishining ILOVASI uchun mos "
+        f"keladigan oddiy USTUNLI DIAGRAMMA (bar chart) ma'lumotlarini tuz - masalan "
+        f"yillar bo'yicha ko'rsatkich, toifalar bo'yicha taqqoslash va h.k. (mavzuga eng "
+        f"mos turini o'zing tanla). FAQAT quyidagi JSON formatida javob ber:\n"
+        f'{{"sarlavha": "Diagramma nomi", "y_o\'qi": "Ko\'rsatkich nomi", '
+        f'"kategoriyalar": ["A", "B", "C", "D"], "qiymatlar": [10, 25, 15, 30]}}\n'
+        f"4-6 ta kategoriya bo'lsin, qiymatlar butun son bo'lsin. {ai_lang} tilida yoz "
+        f"(sarlavha, y_o'qi va kategoriyalar {ai_lang} tilida, qiymatlar - raqam)."
+    )
+    try:
+        data = extract_json(ask_ai(prompt, max_tokens=800))
+        kategoriyalar = data.get("kategoriyalar", [])
+        qiymatlar = data.get("qiymatlar", [])
+        if not kategoriyalar or not qiymatlar or len(kategoriyalar) != len(qiymatlar):
+            return None
+        return {
+            "sarlavha": data.get("sarlavha", "Diagramma"),
+            "y_oqi": data.get("y_o'qi", ""),
+            "kategoriyalar": [str(k) for k in kategoriyalar],
+            "qiymatlar": [float(q) for q in qiymatlar],
+        }
+    except Exception:
+        return None
+
+
+def chizma_yaratish(malumot: dict) -> BytesIO | None:
+    """matplotlib yordamida oddiy ustunli diagramma chizadi va PNG rasm
+    sifatida BytesIO qaytaradi."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(7, 4.2), dpi=150)
+        ranglar = ["#1F3A5F", "#4FA8E0", "#E06A4F", "#3A5A40", "#FFD966", "#7A5AF8"]
+        ax.bar(
+            malumot["kategoriyalar"],
+            malumot["qiymatlar"],
+            color=[ranglar[i % len(ranglar)] for i in range(len(malumot["kategoriyalar"]))],
+        )
+        ax.set_title(malumot["sarlavha"], fontsize=13, fontweight="bold")
+        if malumot.get("y_oqi"):
+            ax.set_ylabel(malumot["y_oqi"])
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        plt.xticks(rotation=20, ha="right")
+        plt.tight_layout()
+
+        buf = BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
+
+def _ilova_jadval_qoshish(doc, jadval: dict, L: dict):
+    """create_docx yakunida hujjatga 'Ilovalar' bo'limi va real Word
+    jadvalini qo'shadi."""
+    doc.add_page_break()
+    doc.add_heading(L.get("ilovalar", "Ilovalar"), level=1)
+    doc.add_heading(jadval["sarlavha"], level=2)
+
+    ustunlar = jadval["ustunlar"]
+    qatorlar = jadval["qatorlar"]
+    table = doc.add_table(rows=1, cols=len(ustunlar))
+    try:
+        table.style = "Light Grid Accent 1"
+    except Exception:
+        pass
+
+    hdr_cells = table.rows[0].cells
+    for i, ustun in enumerate(ustunlar):
+        hdr_cells[i].text = str(ustun)
+        for p in hdr_cells[i].paragraphs:
+            for r in p.runs:
+                r.font.bold = True
+                r.font.size = DocxPt(11)
+
+    for qator in qatorlar:
+        row_cells = table.add_row().cells
+        for i, qiymat in enumerate(qator[:len(ustunlar)]):
+            row_cells[i].text = str(qiymat)
+            for p in row_cells[i].paragraphs:
+                for r in p.runs:
+                    r.font.size = DocxPt(11)
+
+
+def _ilova_chizma_qoshish(doc, chizma_bytes: BytesIO, sarlavha: str):
+    """Ilovalar bo'limiga diagramma rasmini qo'shadi."""
+    doc.add_paragraph()
+    doc.add_heading(sarlavha, level=2)
+    doc.add_picture(chizma_bytes, width=DocxInches(5.5))
+
+
+
+
 def create_docx(mavzu: str, fan: str, bajaruvchi: str, qabul: str, matn: str, til: str = "uz",
-                 universitet: str = "", ish_turi: str = "") -> BytesIO:
+                 universitet: str = "", ish_turi: str = "", turi: str = "mustaqil",
+                 ilova_jadval: dict | None = None, ilova_chizma_bytes: BytesIO | None = None,
+                 ilova_chizma_sarlavha: str = "") -> BytesIO:
     L = LANG.get(til, LANG["uz"])
     doc = Document()
+
+    # --- Butun hujjat uchun yagona, chiroyli shrift ---
+    normal = doc.styles["Normal"]
+    normal.font.name = "Times New Roman"
+    normal.font.size = DocxPt(12)
+
     for _ in range(3):
         doc.add_paragraph()
 
     if universitet:
-        for qator in universitet.splitlines():
+        for i, qator in enumerate(universitet.splitlines()):
             qator = qator.strip()
             if not qator:
                 continue
             up = doc.add_paragraph()
             up.alignment = WD_ALIGN_PARAGRAPH.CENTER
             r = up.add_run(qator.upper())
-            r.font.size = DocxPt(14)
+            r.font.name = "Times New Roman"
+            r.font.size = DocxPt(15 if i == 0 else 13)
             r.font.bold = True
+            r.font.color.rgb = DocxRGBColor(0x1F, 0x3A, 0x5F)
         doc.add_paragraph()
 
     if fan:
         fan_p = doc.add_paragraph()
         fan_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = fan_p.add_run(f'"{fan}" FANIDAN')
+        r.font.name = "Times New Roman"
         r.font.size = DocxPt(14)
+        r.font.italic = True
 
     if ish_turi:
         turi_p = doc.add_paragraph()
         turi_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = turi_p.add_run(ish_turi.upper())
-        r.font.size = DocxPt(20)
+        r.font.name = "Times New Roman"
+        r.font.size = DocxPt(26)
         r.font.bold = True
+        r.font.color.rgb = DocxRGBColor(0x1F, 0x3A, 0x5F)
+
+    # Muqovani jonlantiruvchi ingichka ajratuvchi chiziq
+    chiziq_p = doc.add_paragraph()
+    chiziq_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    chiziq_r = chiziq_p.add_run("─" * 30)
+    chiziq_r.font.color.rgb = DocxRGBColor(0x1F, 0x3A, 0x5F)
 
     doc.add_paragraph()
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = title_p.add_run(f"Mavzu: {mavzu}")
-    run.font.size = DocxPt(16)
+    run.font.name = "Times New Roman"
+    run.font.size = DocxPt(17)
     run.font.bold = True
 
+    doc.add_paragraph()
     doc.add_paragraph()
     for label, value in [("Topshirdi", bajaruvchi), ("Qabul qildi", qabul)]:
         info_p = doc.add_paragraph()
         info_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = info_p.add_run(f"{label}: {value}")
+        r = info_p.add_run(f"{label}: ")
+        r.font.name = "Times New Roman"
         r.font.size = DocxPt(14)
+        r.font.bold = True
+        r2 = info_p.add_run(value)
+        r2.font.name = "Times New Roman"
+        r2.font.size = DocxPt(14)
 
     doc.add_page_break()
 
     matn = strip_markdown(matn)
-    mundarija_royxati = _mundarija_royxatini_yigish(matn)
+    mundarija_royxati = _mundarija_royxatini_yigish(matn, turi)
     _mundarija_qoshish(doc, L["mundarija"], mundarija_royxati)
 
     for paragraph in matn.split("\n"):
         paragraph = paragraph.strip()
         if not paragraph:
             continue
-        sarlavha_matni = paragraph[:-1].strip() if paragraph.endswith(":") else paragraph
-        if _BOB_NAQSH.match(paragraph):
-            doc.add_heading(sarlavha_matni, level=1)
-        elif _KICHIK_MAVZU_NAQSH.match(paragraph):
-            doc.add_heading(sarlavha_matni, level=2)
-        elif paragraph.endswith(":") and len(paragraph) < 40:
-            doc.add_heading(sarlavha_matni, level=1)
+        if _BOB_NAQSH.match(paragraph) or _KICHIK_MAVZU_NAQSH.match(paragraph):
+            level = 1 if _BOB_NAQSH.match(paragraph) else 2
+            sarlavha, qolgan_matn = _sarlavha_va_qolgan_matn(paragraph)
+            doc.add_heading(sarlavha, level=level)
+            if qolgan_matn:
+                p = doc.add_paragraph(qolgan_matn)
+                for run in p.runs:
+                    run.font.size = DocxPt(12)
+        elif paragraph.endswith(":") and len(paragraph) < 60:
+            doc.add_heading(paragraph[:-1].strip(), level=1)
         else:
             p = doc.add_paragraph(paragraph)
             for run in p.runs:
                 run.font.size = DocxPt(12)
+
+    if ilova_jadval:
+        try:
+            _ilova_jadval_qoshish(doc, ilova_jadval, L)
+        except Exception:
+            pass
+
+    if ilova_chizma_bytes:
+        try:
+            if not ilova_jadval:
+                doc.add_page_break()
+                doc.add_heading(L.get("ilovalar", "Ilovalar"), level=1)
+            _ilova_chizma_qoshish(doc, ilova_chizma_bytes, ilova_chizma_sarlavha or "Diagramma")
+        except Exception:
+            pass
 
     _sahifa_raqami_qoshish(doc)
     _majburiy_yangilash_yoqish(doc)
@@ -766,7 +998,7 @@ async def build_slides_data_async(mavzu: str, soni: int, til: str, status_msg, o
             }
         slides_data.append({"title": title, "image_query": content.get("image_query", mavzu), "bullets": content.get("bullets", [])})
         try:
-            await status_msg.edit_text(f"⏳ Slaydlar tayyorlanmoqda... {idx}/{soni}")
+            await status_msg.edit_text(f"⏳ Slaydlar tayyorlanmoqda... {idx}/{soni}\n{_progress_bar(idx, soni)}")
         except Exception:
             pass
 
@@ -857,7 +1089,10 @@ async def generate_mustaqil(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
                 f"sarlavhalari bilan. Asosiy qismni 2-3 ta kichik mavzuga bo'lib, har birini alohida "
                 f"sarlavha bilan chuqur yorit. Har bir bo'limda aniq faktlar, misollar va tushuntirishlar "
                 f"bo'lsin. {ai_lang} tilida, ilmiy uslubda, professional va ma'lumotga boy qilib yoz. "
-                f"MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) foydalanma."
+                f"MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) foydalanma. "
+                f"JUDA MUHIM FORMAT TALABI: har bir sarlavhani albatta ALOHIDA QATORGA yoz, "
+                f"sarlavhadan keyin bo'sh qator qoldir, so'ng matnni YANGI qatordan boshla - "
+                f"sarlavha va matn bir qatorga yopishib qolmasin."
             )
             matn = await asyncio.to_thread(ask_ai, prompt, 7000)
             try:
@@ -866,7 +1101,7 @@ async def generate_mustaqil(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
                 pass
             return await asyncio.to_thread(
                 create_docx, params["mavzu"], params["fan"], params["bajaruvchi"], params["qabul"], matn, til,
-                params.get("universitet", ""), "Mustaqil ish",
+                params.get("universitet", ""), "Mustaqil ish", "mustaqil",
             )
 
         docx_file = await asyncio.wait_for(ish(), timeout=GEN_TIMEOUT)
@@ -947,7 +1182,7 @@ async def build_test_savollari(mavzu: str, til: str, soni: int, status_msg) -> l
         savollar.extend(yangi)
         qoldi -= batch_soni
         try:
-            await status_msg.edit_text(f"⏳ Savollar tayyorlanmoqda... {min(len(savollar), soni)}/{soni}")
+            await status_msg.edit_text(f"⏳ Savollar tayyorlanmoqda... {min(len(savollar), soni)}/{soni}\n{_progress_bar(min(len(savollar), soni), soni)}")
         except Exception:
             pass
     return savollar[:soni]
@@ -1036,9 +1271,14 @@ async def generate_kursish(context: ContextTypes.DEFAULT_TYPE, chat_id: int, use
     soni = params["soni"]
     status_msg = await context.bot.send_message(chat_id, "⏳ Kurs ishi yozilmoqda, biroz kuting...")
     try:
+        _bolim_raqami = {"n": 0}
+
         async def bolim_yoz(nomi: str, korsatma: str, soz: int, max_tok: int) -> str:
+            _bolim_raqami["n"] += 1
             try:
-                await status_msg.edit_text(f"⏳ {nomi} yozilmoqda...")
+                await status_msg.edit_text(
+                    f"⏳ {nomi} yozilmoqda...\n{_progress_bar(_bolim_raqami['n'], 4)}"
+                )
             except Exception:
                 pass
             prompt = (
@@ -1047,7 +1287,10 @@ async def generate_kursish(context: ContextTypes.DEFAULT_TYPE, chat_id: int, use
                 f"Aniq ilmiy faktlar, chuqur tahlil, real misollar va mantiqiy fikrlar bilan, "
                 f"yuzaki/umumiy gaplardan saqlanib yoz. Professional ilmiy-akademik uslubda, "
                 f"{ai_lang} tilida yoz. MUHIM: hech qanday Markdown belgilaridan (**, *, #, -) "
-                f"foydalanma. Faqat so'ralgan qismni yoz, boshqa izoh qo'shma."
+                f"foydalanma. Faqat so'ralgan qismni yoz, boshqa izoh qo'shma. "
+                f"JUDA MUHIM FORMAT TALABI: har bir sarlavhani ('I BOB. ...', '1.1. ...' kabi) "
+                f"albatta ALOHIDA QATORGA yoz, sarlavhadan keyin bo'sh qator qoldir, so'ng "
+                f"matnni YANGI qatordan boshla - sarlavha va matn bir qatorga yopishib qolmasin."
             )
             return await asyncio.to_thread(ask_ai, prompt, max_tok)
 
@@ -1087,12 +1330,26 @@ async def generate_kursish(context: ContextTypes.DEFAULT_TYPE, chat_id: int, use
             matn = "\n\n".join([kirish, bob1, bob2, yakun])
 
             try:
+                await status_msg.edit_text(f"⏳ Ilova (jadval) tayyorlanmoqda...\n{_progress_bar(4, 5)}")
+            except Exception:
+                pass
+            ilova_jadval = await asyncio.to_thread(generate_ilova_jadval, mavzu, fan, til)
+
+            try:
+                await status_msg.edit_text(f"⏳ Ilova (diagramma) tayyorlanmoqda...\n{_progress_bar(5, 5)}")
+            except Exception:
+                pass
+            chizma_malumot = await asyncio.to_thread(generate_ilova_chizma_malumot, mavzu, fan, til)
+            chizma_bytes = await asyncio.to_thread(chizma_yaratish, chizma_malumot) if chizma_malumot else None
+
+            try:
                 await status_msg.edit_text("📦 Fayl yig'ilmoqda...")
             except Exception:
                 pass
             return await asyncio.to_thread(
                 create_docx, params["mavzu"], params["fan"], params["bajaruvchi"], params["qabul"], matn, til,
-                params.get("universitet", ""), "Kurs ishi",
+                params.get("universitet", ""), "Kurs ishi", "kursish", ilova_jadval,
+                chizma_bytes, (chizma_malumot or {}).get("sarlavha", ""),
             )
 
         docx_file = await asyncio.wait_for(ish(), timeout=GEN_TIMEOUT)
@@ -1223,7 +1480,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/slayd - rasmli, dizaynli PowerPoint (.pptx) tayyorlab beraman\n"
         "/mustaqil - Word (.docx) mustaqil ish tayyorlab beraman\n"
         f"/kursishi - ilmiy darajadagi kurs ishi ({PAYMENT_PRICE}, maks. {MAX_BOB} bob)\n"
-        f"/test - test/nazorat savollari generatori ({TEST_MIN}-{TEST_MAX} ta savol)\n",
+        f"/test - test/nazorat savollari generatori ({TEST_MIN}-{TEST_MAX} ta savol)\n"
+        "/masala - matematika/fizika masalasi rasmini bosqichma-bosqich yechib beraman\n",
         reply_markup=kb,
     )
 
@@ -1722,6 +1980,81 @@ async def handle_regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await generate_mustaqil(context, chat_id, user_id, params)
 
 
+def solve_math_problem(rasm_bytes: bytes, til: str = "uz") -> str:
+    """Rasmdagi matematika/fizika masalasini vision model orqali o'qib,
+    bosqichma-bosqich yechim tuzadi. Muvaffaqiyatsiz bo'lsa, xatolik matnini
+    o'zini qaytaradi (foydalanuvchiga ko'rsatish uchun)."""
+    ai_lang = LANG.get(til, LANG["uz"])["ai_lang"]
+    try:
+        b64 = base64.b64encode(rasm_bytes).decode("utf-8")
+        resp = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Rasmda matematika yoki fizika fanidan masala/misol bor. Uni diqqat "
+                            "bilan o'qi va quyidagicha javob ber:\n"
+                            "1) Avval masala shartini qisqacha o'z so'zlaring bilan yoz.\n"
+                            "2) Yechimni ANIQ BOSQICHLARGA bo'lib, har bir bosqichni raqamlab "
+                            "(1-qadam, 2-qadam, ...) tushuntirib yoz - formulalar, hisob-kitoblar "
+                            "va nima uchun shu amal bajarilayotgani bilan.\n"
+                            "3) Oxirida 'Javob:' deb aniq yakuniy natijani ko'rsat.\n"
+                            f"Hammasini {ai_lang} tilida, tushunarli va o'quvchiga mos tarzda yoz. "
+                            "Markdown belgilaridan (**, #, *, -) foydalanma. Agar rasmda masala "
+                            "aniq ko'rinmasa yoki matematik/fizik masala emasligini payqasang, "
+                            "shuni ochiq ayt."
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            }],
+            temperature=0.2,
+            max_tokens=2500,
+        )
+        return strip_markdown(resp.choices[0].message.content.strip())
+    except Exception as e:
+        return f"Kechirasiz, masalani yechishda xatolik yuz berdi: {e}"
+
+
+async def masala_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["_masala_kutilmoqda"] = True
+    await update.message.reply_text(
+        "📸 Matematika yoki fizika masalasi/misoli tasvirlangan rasmni yuboring - "
+        "men uni bosqichma-bosqich yechib beraman."
+    )
+
+
+async def handle_masala_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("_masala_kutilmoqda"):
+        return  # Boshqa oqim (masalan to'lov cheki) uchun - bu yerga tegishli emas
+    context.user_data["_masala_kutilmoqda"] = False
+
+    status_msg = await update.message.reply_text("⏳ Masala tahlil qilinmoqda...")
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        rasm_bytes = bytes(await photo_file.download_as_bytearray())
+        til = context.user_data.get("til", "uz")
+        yechim = await asyncio.to_thread(solve_math_problem, rasm_bytes, til)
+
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        # Telegram xabar chegarasi (4096) dan uzun bo'lsa, bo'laklarga bo'lib yuboramiz
+        for i in range(0, len(yechim), 3800):
+            await update.message.reply_text(yechim[i:i + 3800])
+    except Exception as e:
+        xato_yozish(update.effective_user.id, "masala_yechish", e)
+        try:
+            await status_msg.edit_text(f"Xatolik yuz berdi: {e}")
+        except Exception:
+            await update.message.reply_text(f"Xatolik yuz berdi: {e}")
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _flow_tozalash(context)
     await update.message.reply_text("Bekor qilindi.")
@@ -1782,7 +2115,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("masala", masala_start))
     app.add_handler(conv)
+    app.add_handler(MessageHandler(filters.PHOTO, handle_masala_photo))
     app.add_handler(CallbackQueryHandler(handle_regenerate, pattern="^regen_"))
     app.add_handler(CallbackQueryHandler(handle_admin_decision, pattern="^admin_(ha|yoq)_"))
 
