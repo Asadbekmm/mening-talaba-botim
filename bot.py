@@ -1468,13 +1468,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN_USERNAME}")]])
     await update.message.reply_text(
         "👋 Assalomu alaykum, talaba!\n\n"
-        "O‘qish va topshiriqlar bilan qiynalyapsizmi?\n"
-        "Men sizning eng yaqin Talaba Yordamchi botingizman! 🎓\n\n"
-        "Men nimalar qila olaman?\n"
-        "📝 Istalgan mavzuda mukammal Mustaqil ishlar tayyorlash;\n"
-        "📊 Chiroyli va kreativ Slaydlar (Prezentatsiyalar) yaratish;\n"
-        "⏱ Vaqtingizni tejash va darslaringizni a'lo baholarga yopish.\n\n"
-        "💻 Dasturchi: KIRGIZBAYEV ASADBEK\n\n"
         "Boshlash uchun pastdagi kerakli buyruqni bering!👇\n\n"
         "Buyruqlar:\n"
         "/slayd - rasmli, dizaynli PowerPoint (.pptx) tayyorlab beraman\n"
